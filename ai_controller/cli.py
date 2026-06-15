@@ -311,6 +311,7 @@ def run_loop(
     resume: bool = False,
     keep_backups: int = 0,
     no_plan: bool = False,
+    dry_run: bool = False,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
@@ -331,6 +332,8 @@ def run_loop(
         cprint(f"  Git      : 自动 commit", C.BOLD)
     if no_plan:
         cprint(f"  模式     : 逐轮模式（无任务列表）", C.BOLD)
+    if dry_run:
+        cprint(f"  模式     : 预览模式（不实际修改任何文件）", C.YELLOW + C.BOLD)
     print()
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
@@ -349,6 +352,7 @@ def run_loop(
             target_dir, agent, max_rounds, allowed_ext,
             no_backup, no_git, sleep_between, timeout,
             agent_args, resume, keep_backups, ext_filter,
+            dry_run=dry_run,
         )
         return
 
@@ -368,13 +372,19 @@ def run_loop(
             get_logger().warning("无法加载任务列表，将重新生成。")
 
     if tasks is None:
-        tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
+        if dry_run and Path(target_dir, TASK_FILE).is_file():
+            # 预览模式：如果已存在任务列表文件则直接加载，避免重新调用 Agent
+            tasks = load_task_list(target_dir)
+            get_logger().info("预览模式: 加载已有任务列表，跳过规划阶段 Agent 调用")
+        if tasks is None:
+            tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
         if tasks is None:
             get_logger().warning("任务列表生成失败，回退到逐轮模式")
             _run_legacy_loop(
                 target_dir, agent, max_rounds, allowed_ext,
                 no_backup, no_git, sleep_between, timeout,
                 agent_args, False, keep_backups, ext_filter,
+                dry_run=dry_run,
             )
             return
 
@@ -391,6 +401,11 @@ def run_loop(
         for t in tasks:
             logger.info(f"  #{t.get('id')} [{t.get('priority', '?')}] [{t.get('type', '')}] {t.get('title', '')}")
         logger.info(f"{'─' * 40}")
+
+    # ─── 预览模式：打印任务执行计划后退出 ───
+    if dry_run:
+        _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args)
+        return
 
     # 阶段 2：逐条执行任务
     round_num = parse_changelog_for_resume(target_dir)
@@ -462,6 +477,7 @@ def _run_legacy_loop(
     resume: bool,
     keep_backups: int,
     ext_filter: Optional[str],
+    dry_run: bool = False,
 ):
     """原有的逐轮模式：每轮让 AI 自己选一件事来做。"""
     consecutive_noops = 0
@@ -515,6 +531,12 @@ def _run_legacy_loop(
             )
         prompt = "\n".join(parts)
 
+        # ─── 预览模式：只打印计划，不实际执行 ───
+        if dry_run:
+            _print_dry_run_round(agent, round_num, prompt, agent_args, ext_filter, target_dir)
+            consecutive_noops = 0
+            continue
+
         result = _execute_single_round(
             target_dir, agent, round_num, prompt, allowed_ext,
             no_backup, no_git, timeout, agent_args, ext_filter,
@@ -537,6 +559,93 @@ def _run_legacy_loop(
 
         cprint(f"  ⏳ 等待 {sleep_between}s...", C.CYAN)
         time.sleep(sleep_between)
+
+
+# ─── 预览模式辅助函数 ──────────────────────────────────────────────────
+
+def _build_dry_run_command(agent: str, prompt: str, agent_args: Optional[list],
+                           ext_filter: Optional[str], target_dir: str) -> str:
+    """构建预览模式下展示的等价命令行，供用户参考。"""
+    cfg = AGENTS[agent]
+    cmd_parts = [cfg["cmd"]]
+    if agent_args:
+        cmd_parts.extend(agent_args)
+    cmd_parts.extend(cfg["args"])
+
+    if cfg["cwd_option"]:
+        cmd_parts.extend([cfg["cwd_option"], target_dir])
+
+    full_prompt = prompt
+    if ext_filter:
+        full_prompt = ext_filter + "\n\n" + prompt
+    cmd_parts.append(shlex.quote(full_prompt))
+
+    return " ".join(cmd_parts)
+
+
+def _print_dry_run_round(agent: str, round_num: int, prompt: str,
+                         agent_args: Optional[list], ext_filter: Optional[str],
+                         target_dir: str):
+    """预览模式：打印单轮的详细执行计划，不实际调用 Agent。"""
+    cprint(f"\n  ╔{'═' * 51}╗", C.YELLOW)
+    cprint(f"  ║  预览轮次 #{round_num} — 以下为计划执行内容，不会实际修改文件 ║", C.YELLOW)
+    cprint(f"  ╚{'═' * 51}╝", C.YELLOW)
+
+    cprint(f"  📋 本轮任务提示词:", C.BOLD)
+    # 打印 prompt 的前面部分（截断过长内容）
+    prompt_preview = prompt[:500]
+    for line in prompt_preview.split("\n"):
+        cprint(f"     {line}", C.CYAN)
+    if len(prompt) > 500:
+        cprint(f"     ...（共 {len(prompt)} 字符，已截断显示）", C.CYAN)
+
+    cprint(f"\n  🔧 计划执行的等价命令:", C.BOLD)
+    cmd = _build_dry_run_command(agent, prompt, agent_args, ext_filter, target_dir)
+    cprint(f"     {cmd}", C.GREEN)
+
+    cprint(f"\n  ⚡ 实际操作: 跳过 Agent 调用、备份、Git 提交", C.YELLOW)
+
+
+def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
+                       max_rounds: int, agent_args: Optional[list]):
+    """预览模式：遍历任务列表，打印每个待执行任务的详细计划。"""
+    pending = [t for t in tasks if t.get("status") != "done"]
+    if not pending:
+        get_logger().info("预览模式: 所有任务已完成，无待执行任务。")
+        return
+
+    cprint(f"\n{'─' * 55}", C.CYAN)
+    cprint(f"  预览模式: 以下 {len(pending)} 个任务将按顺序执行（不会实际修改文件）", C.YELLOW + C.BOLD)
+    cprint(f"{'─' * 55}", C.CYAN)
+
+    round_num = 0
+    for task in pending:
+        round_num += 1
+        if max_rounds > 0 and round_num > max_rounds:
+            remaining = len(pending) - round_num + 1
+            get_logger().info(f"预览模式: 达到最大轮次 {max_rounds}（剩余 {remaining} 个任务不会执行）")
+            break
+
+        tid = task.get("id", "?")
+        title = task.get("title", "")
+        desc = task.get("description", "")
+        ttype = task.get("type", "")
+        prio = task.get("priority", "?")
+
+        cprint(f"\n{'─' * 55}", C.CYAN)
+        cprint(f"  任务 #{tid} [{prio}] [{ttype}] {title}", C.BOLD + C.CYAN)
+        cprint(f"{'─' * 55}", C.CYAN)
+
+        cprint(f"  描述: {desc}", C.CYAN)
+
+        # 构建任务 prompt 并打印计划
+        prompt = build_task_prompt(task)
+        _print_dry_run_round(agent, round_num, prompt, agent_args, None, target_dir)
+
+    cprint(f"\n{'─' * 55}", C.CYAN)
+    cprint(f"  预览完成: 共 {len(pending)} 个待执行任务，预览 {min(round_num, len(pending))} 个", C.GREEN + C.BOLD)
+    cprint(f"  运行不带 --dry-run 的命令可正式执行", C.CYAN)
+    cprint(f"{'─' * 55}", C.CYAN)
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────
@@ -578,6 +687,8 @@ def main():
                         help="跳过任务列表规划阶段，使用传统逐轮模式（每轮 AI 自行选择改进点）")
     parser.add_argument("--plan-only", action="store_true",
                         help="只生成任务列表 AI-TASKS.md，不执行")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="预览模式：跳过 Agent 调用和文件修改，只打印每轮要执行的任务描述和命令")
 
     args = parser.parse_args()
 
@@ -655,6 +766,7 @@ def main():
             resume=args.resume,
             keep_backups=args.keep_backups,
             no_plan=args.no_plan,
+            dry_run=args.dry_run,
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
