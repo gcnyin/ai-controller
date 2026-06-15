@@ -215,6 +215,7 @@ def _execute_single_round(
     keep_backups: int,
     summary_prefix: str = "",
     error_label: str = "Agent 返回异常",
+    defer_commit: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑：备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
 
@@ -282,7 +283,7 @@ def _execute_single_round(
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
 
         # ── Git 提交 ──
-        if git_repo:
+        if git_repo and not defer_commit:
             diff_stat = get_git_diff_summary(target_dir)
             git_commit(target_dir, round_num)
             if diff_stat:
@@ -457,6 +458,7 @@ def run_loop(
     round_num = global_round
     consecutive_noops = 0
     tasks_done_this_run = 0
+    git_repo = is_git_repo(target_dir) and not no_git
 
     while True:
         # 获取下一个待执行任务（从内存缓存查找，避免重复解析文件）
@@ -492,6 +494,8 @@ def run_loop(
             mark_task_done(target_dir, task["id"], round_num, tasks,
                            run_count=run_count, last_run=last_run,
                            global_round=round_num)
+            if git_repo:
+                git_commit(target_dir, round_num)
             consecutive_noops = 0
             tasks_done_this_run += 1
             time.sleep(sleep_between)
@@ -512,6 +516,7 @@ def run_loop(
             keep_backups,
             summary_prefix=f"[任务#{tid}] ",
             error_label=f"跳过任务 #{tid}",
+            defer_commit=True,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -530,6 +535,10 @@ def run_loop(
             # Agent 成功但无改动 —— 任务天然无需改动，重置计数器
             consecutive_noops = 0
         tasks_done_this_run += 1
+
+        # Agent 成功或有改动：统一提交（含 AI-TASKS.md 状态更新）
+        if git_repo:
+            git_commit(target_dir, round_num)
 
         print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)

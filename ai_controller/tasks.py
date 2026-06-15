@@ -151,6 +151,8 @@ def save_task_list(target_dir: str, tasks: List[dict],
     if done:
         lines.append("## 已完成")
         lines.append("")
+        # 按完成时间降序排列（最近完成的排前面）
+        done.sort(key=lambda t: t.get("completed_time", ""), reverse=True)
         for t in done:
             tid = t.get("id", "?")
             title = t.get("title", "")
