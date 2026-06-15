@@ -275,10 +275,21 @@ def write_round_log(
         f.write("\n".join(lines) + "\n")
 
 
-def get_changed_files(target_dir: str) -> list[str]:
-    """获取本轮改动的文件列表 -- 使用 git status --porcelain 捕获所有变更（含新文件）"""
-    try:
-        if (Path(target_dir) / ".git").is_dir():
+def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
+    """获取本轮改动的文件列表。
+
+    优先使用 git status --porcelain（精确且快速）。
+    如果没有 git 仓库，则回退到文件系统时间戳比较。
+
+    Args:
+        target_dir: 目标目录路径
+        since_ts: fallback 模式下用于比较的时间戳，凡 mtime > since_ts 的文件视为改动过
+    """
+    target_path = Path(target_dir)
+
+    # ── 优先：git 仓库 ──
+    if (target_path / ".git").is_dir():
+        try:
             r = subprocess.run(
                 ["git", "-C", target_dir, "status", "--porcelain"],
                 capture_output=True, text=True, timeout=10,
@@ -296,8 +307,28 @@ def get_changed_files(target_dir: str) -> list[str]:
                 if path:
                     files.append(path)
             return files
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+    # ── 回退：基于文件系统时间戳（用于非 git 目录） ──
+    if since_ts > 0:
+        changed = []
+        # 需要跳过的目录（不遍历）
+        skip_dirs = {BACKUP_DIR_NAME, ".git", "__pycache__", ".venv", "venv",
+                     "node_modules", "dist", "build", ".next"}
+        for root, dirs, files in os.walk(target_dir, topdown=True):
+            # 过滤要跳过的目录
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".ai-controller-")]
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    if os.path.getmtime(fp) > since_ts:
+                        rel = os.path.relpath(fp, target_dir)
+                        changed.append(rel)
+                except OSError:
+                    pass
+        return sorted(changed)
+
     return []
 
 
@@ -372,30 +403,36 @@ def call_agent(agent: str, prompt: str, target_dir: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1,
         )
 
-        output_lines = []
-        # 实时输出 + 收集
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            output_lines.append(line)
-
-        proc.wait(timeout=timeout)
+        # 使用 communicate() 替代 for 循环 + wait，这样才能真正落实超时。
+        # for line in proc.stdout 会一直阻塞到 stdout 关闭，如果进程挂死，
+        # 超时机制永远不会触发。communicate() 在内部用 select/线程同时处理
+        # 读取和等待，是 Python 官方推荐的正确方式。
+        stdout_data, _ = proc.communicate(timeout=timeout)
         elapsed = time.time() - start
 
-        full_output = "".join(output_lines)
-        summary = parse_summary(full_output)
+        if stdout_data:
+            print(stdout_data, end="", flush=True)
 
-        return proc.returncode == 0, summary, full_output, elapsed
+        summary = parse_summary(stdout_data)
+        return proc.returncode == 0, summary, stdout_data, elapsed
 
     except subprocess.TimeoutExpired:
         proc.kill()
+        # 超时后尝试收集子进程已产生的部分输出
+        try:
+            partial_stdout, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            partial_stdout = ""
         elapsed = time.time() - start
+        if partial_stdout:
+            print(partial_stdout, end="", flush=True)
         cprint(f"\n  Agent 超时（{timeout} 秒）", C.RED)
-        return False, "Agent 执行超时", "", elapsed
+        return False, "Agent 执行超时", partial_stdout, elapsed
     except KeyboardInterrupt:
         proc.kill()
+        proc.communicate(timeout=5)
         raise
     except Exception as e:
         elapsed = time.time() - start
@@ -507,6 +544,9 @@ def run_loop(
             except Exception:
                 pass
 
+        # 记录时间戳，用于非 git 目录下的文件改动检测
+        before_ts = time.time()
+
         # 调用 agent
         prompt = build_round_prompt(round_num, max_rounds, prev_summary)
         success, summary, raw_output, elapsed = call_agent(
@@ -522,7 +562,7 @@ def run_loop(
             continue
 
         # 检查是否有实际改动
-        changed_files = get_changed_files(target_dir)
+        changed_files = get_changed_files(target_dir, before_ts)
         has_diff = bool(changed_files)
 
         if has_diff:
