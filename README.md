@@ -22,27 +22,29 @@ npm i -g @openai/codex
 
 ## 用法
 
+### 默认模式（先规划再执行）
+
 ```bash
-# pi 跑 10 轮
+# pi 跑 10 轮（先让 AI 生成任务列表，再逐条执行）
 python ai_controller.py ./my-project --agent pi --max-rounds 10
 
 # opencode 无限循环
 python ai_controller.py ./my-project --agent opencode --max-rounds 0
 
-# claude 只改 Python 文件，跑 5 轮
+# claude 只改 Python 文件
 python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
 
-# codex 跑 3 轮
-python ai_controller.py ./my-project --agent codex --max-rounds 3
+# 只生成任务列表，不执行（保存到 AI-TASKS.md）
+python ai_controller.py ./my-project --agent pi --plan-only
 
-# pi 指定模型和 provider
-python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --provider openai'
-
-# 中断后恢复，从上次断点继续
+# 恢复执行（从 AI-TASKS.md 读取未完成任务继续）
 python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
+```
 
-# 只保留最近 5 个备份，自动清理旧备份
-python ai_controller.py ./my-project --agent pi --max-rounds 100 --keep-backups 5
+### 传统模式（跳过规划，每轮 AI 自行选择）
+
+```bash
+python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 ```
 
 ## 参数
@@ -57,55 +59,94 @@ python ai_controller.py ./my-project --agent pi --max-rounds 100 --keep-backups 
 | `--sleep` | 每轮间隔秒数 | 2.0 |
 | `--no-backup` | 不备份 | false |
 | `--no-git` | 不自动 git commit | false |
-| `--agent-args` | 传递给 Agent 的额外参数，用引号包裹 | - |
-| `--resume` | 中断后恢复：读取 changelog 从下一轮继续 | false |
-| `--keep-backups` | 只保留最近 N 个备份，旧备份自动清理（0=不限制） | 0 |
+| `--agent-args` | 传递给 Agent 的额外参数 | - |
+| `--resume` | 中断后恢复 | false |
+| `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
+| `--no-plan` | 跳过规划阶段，使用传统逐轮模式 | false |
+| `--plan-only` | 只生成任务列表，不执行 | false |
 
 ## 工作流程
 
+### 默认模式（v2.1 新增）
+
+```
+┌──────────────────────────────┐
+│ 阶段 1: 规划                  │
+│ AI 扫描代码库，生成 JSON 格式  │
+│ 的完整任务列表（按优先级排序）  │
+└───────────┬──────────────────┘
+            ▼
+┌──────────────────────────────┐
+│ 保存任务列表到 AI-TASKS.md    │
+│ 格式：待执行/已完成            │
+└───────────┬──────────────────┘
+            ▼
+┌──────────────────────────────┐
+│ 阶段 2: 逐条执行              │
+│ ┌────────────────────────┐   │
+│ │ 读取下一个待执行任务     │   │
+│ │ → 备份（可选）          │   │
+│ │ → 构建任务 prompt       │   │
+│ │ → 调用 Agent 执行       │   │
+│ │ → 检查改动，commit      │   │
+│ │ → 标记任务为已完成       │   │
+│ │ → 循环                  │   │
+│ └────────────────────────┘   │
+└──────────────────────────────┘
+```
+
+### 传统模式（--no-plan）
+
 ```
 ┌──────────────────────────┐
-│ 1. 备份当前代码 (可选)    │
-└───────────┬──────────────┘
-            ▼
-┌──────────────────────────┐
-│ 2. 构建提示词             │
-│   "做一轮改进，直接改文件" │
-└───────────┬──────────────┘
-            ▼
-┌──────────────────────────┐
-│ 3. 调用 Agent 非交互模式  │
-│   pi -p "..."             │
-│   opencode run "..."      │
-│   claude -p "..."         │
-│   codex exec "..."        │
-└───────────┬──────────────┘
-            ▼
-┌──────────────────────────┐
-│ 4. 检查 git diff          │
-│   有改动 → commit         │
-│   无改动 → noop 计数+1    │
-└───────────┬──────────────┘
-            ▼
-      下一轮 ↻ (或无改动3次退出)
+│ 每轮：备份 → AI 自行选择   │
+│ 一个改进点 → 修改文件      │
+│ → 记录日志 → 下一轮        │
+└──────────────────────────┘
 ```
+
+## 任务列表文件 (AI-TASKS.md)
+
+规划阶段会在目标目录生成 `AI-TASKS.md`，格式如下：
+
+```markdown
+# AI 任务列表
+生成时间: 2026-06-15 10:30:00
+
+共 5 个任务
+
+## 待执行
+
+- [ ] **#1** [high] [修复类] 修复 token 为空的空指针异常
+  修改 src/auth/login.py 中的 validate_token 函数，增加空值检查
+
+- [ ] **#2** [medium] [功能开发类] 添加请求日志中间件
+  ...
+
+## 已完成
+
+- [x] **#3** 修复 login bug (Round 1)
+```
+
+- `--resume` 会自动读取该文件，从未完成的任务继续
+- 可以在执行过程中手动编辑该文件调整任务优先级或删除不需要的任务
 
 ## 中断恢复
 
-Ctrl+C 中断后，可以带 `--resume` 重新运行，控制器会读取 `AI-CHANGELOG.md` 自动找到上次断点，从下一轮继续。
+Ctrl+C 中断后，可以带 `--resume` 重新运行：
 
 ```bash
-# 比如跑 10 轮，第 5 轮被中断了
+# 默认模式：从 AI-TASKS.md 读取未完成任务，继续执行
 python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
-# 输出: 恢复模式 : 从第 6 轮继续（上次完成 5 轮）
-```
 
-- 恢复时会把上一轮的改动说明传给 AI，避免重复做相同的事
-- 如果 changelog 中已无更多轮次可恢复（如已完成全部轮次），会直接退出
+# 传统模式：从 AI-CHANGELOG.md 找到断点，从下一轮继续
+python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume --no-plan
+```
 
 ## 退出条件
 
 - 达到 `--max-rounds` 上限
+- 所有任务执行完毕（默认模式）
 - 连续 3 轮无代码改动
 - Ctrl+C 手动中断
 
@@ -123,7 +164,7 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
 
 ## Round 1 — 2026-06-15 10:30:15
 
-**改动说明**: 修复了 login 函数中 token 为空的空指针异常
+**改动说明**: [任务#1] 修复了 login 函数中 token 为空的空指针异常
 
 **改动文件** (2 个):
 - `src/auth/login.py`
@@ -134,7 +175,3 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
 ## Round 2 — 2026-06-15 10:32:45
 ...
 ```
-
-- 如果日志文件已存在，会追加写入（不会覆盖）
-- prompt 要求 AI 在输出末尾给出 `SUMMARY: <一句话说明>`，控制器解析后写入日志
-- 上一轮的改动说明会传给下一轮，让 AI 知道之前做了什么、避免重复

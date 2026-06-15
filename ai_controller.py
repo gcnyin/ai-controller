@@ -2,23 +2,22 @@
 """
 AI 自迭代控制器 —— 调用 pi/opencode/claude/codex 让 AI 自动循环改进代码。
 
+默认两阶段模式：先让 AI 扫描代码库生成完整任务列表，再逐条执行。
+
 用法:
     python ai_controller.py <目录> --agent pi [选项]
 
 示例:
-    # pi 跑 10 轮
+    # 默认模式：先规划再执行
     python ai_controller.py ./my-project --agent pi --max-rounds 10
 
-    # opencode 无限循环
-    python ai_controller.py ./my-project --agent opencode --max-rounds 0
+    # 只生成任务列表 AI-TASKS.md
+    python ai_controller.py ./my-project --agent pi --plan-only
 
-    # claude 只改 .py 文件
-    python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
+    # 传统模式：每轮 AI 自行选择
+    python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 
-    # codex 跑 3 轮
-    python ai_controller.py ./my-project --agent codex --max-rounds 3
-
-    # 从中断处恢复继续迭代
+    # 恢复继续迭代
     python ai_controller.py ./my-project --agent pi --resume
 """
 
@@ -28,14 +27,16 @@ import sys
 import time
 import shutil
 import shlex
+import json
 import argparse
 import textwrap
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 BACKUP_DIR_NAME = ".ai-controller-backups"
+TASK_FILE = "AI-TASKS.md"
 
 # ─── Agent 配置 ────────────────────────────────────────────────────────
 
@@ -64,10 +65,10 @@ AGENTS = {
 
 # ─── 提示词模板 ────────────────────────────────────────────────────────
 
-TASK_PROMPT = textwrap.dedent("""\
-    你是一个高级软件工程师，正在对一个代码库进行持续迭代改进。
+PLAN_PROMPT = textwrap.dedent("""\
+    你是一个高级软件工程师，需要对一个代码库进行全面评估。
 
-    你的任务是：扫描整个代码库，找出当前优先级最高、价值最大的一个改进点，并直接实现它。
+    你的任务是：仔细扫描整个代码库，生成一份按优先级排序的改进任务列表。
 
     ## 改进类型（按场景分类）
 
@@ -83,24 +84,47 @@ TASK_PROMPT = textwrap.dedent("""\
 
     ## 输出要求（重要）
 
-    改动完成后，你必须在输出的最后单独一行给出改动总结，格式：
-    SUMMARY: <一句话中文说明你做了什么改动，以及为什么选这个>
+    你必须使用以下 JSON 格式输出任务列表（不要包含 markdown 代码块标记，只输出纯 JSON）：
 
-    如果仔细分析后认为代码库已经非常完善，确实无需任何改动，输出：
-    SUMMARY: 无需改动，代码库已完善
-    （只有在你认真扫描并确认后，才能说无需改动）
+    {
+      "tasks": [
+        {"id": 1, "priority": "high", "type": "修复类", "title": "简短标题", "description": "详细描述要做什么、改哪个文件、为什么选这个"},
+        {"id": 2, "priority": "medium", "type": "功能开发类", "title": "简短标题", "description": "详细描述"}
+      ],
+      "summary": "整体评估总结，用中文"
+    }
+
+    规则：
+    - id 从 1 开始递增
+    - priority 为 high / medium / low
+    - title 不超过 30 个字
+    - description 要说清楚改什么文件、做什么改动
+    - 按优先级从高到低排列
+    - 如果代码库已经很完善，tasks 可以为空数组
+    - 禁止使用 emoji
+    - 使用中文
+
+    开始吧，先扫描代码库，然后生成完整的任务列表。
+    """).strip()
+
+TASK_PROMPT = textwrap.dedent("""\
+    你是一个高级软件工程师，正在执行一个具体的改进任务。
+
+    ## 当前任务
+
+    {task_description}
 
     ## 行为准则
 
-    - 使用中文回复，所有说明、注释、SUMMARY 必须用中文
-    - 禁止使用 emoji，回复和代码注释中不要出现任何 emoji 符号
-    - 一次只做一个改进，确保质量
     - 直接修改文件，不要只给建议
-    - 保持改动最小化，不对无关部分动手
+    - 保持改动最小化，只做当前任务要求的事，不对无关部分动手
     - 确保改动后代码仍然可编译/可运行
     - 不改 .git/、node_modules/、.venv/ 等非项目目录
+    - 使用中文回复，所有说明、注释必须用中文
+    - 禁止使用 emoji
 
-    开始吧，先扫描代码库，然后选择最有价值的一件事来做。
+    改动完成后，在输出最后单独一行给出改动总结，格式：
+    SUMMARY: <一句话中文说明你做了什么改动>
     """).strip()
 
 
@@ -108,26 +132,201 @@ TASK_PROMPT = textwrap.dedent("""\
 LOG_FILE = "AI-CHANGELOG.md"
 
 
-def build_round_prompt(round_num: int, max_rounds: int, prev_summary: str = "") -> str:
-    """构建每轮的提示词，注入当前轮次信息和上轮改动上下文"""
-    parts = [TASK_PROMPT]
+def build_task_prompt(task: dict) -> str:
+    """为单个任务构建执行提示词"""
+    desc = f"**[{task.get('type', '改进')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
+    return TASK_PROMPT.format(task_description=desc)
 
-    # 注入轮次信息
-    round_info = f"\n\n## 当前迭代上下文\n\n" \
-                 f"这是第 {round_num} 轮"
-    if max_rounds > 0:
-        round_info += f" / 共 {max_rounds} 轮"
-    round_info += "。"
-    parts.append(round_info)
 
-    # 注入上轮改动上下文，帮助 AI 了解历史、避免重复
-    if prev_summary:
-        parts.append(
-            f"\n上一轮 AI 完成的改动: {prev_summary}\n"
-            f"请不要再做相同的改动，继续寻找新的改进点。"
-        )
+# ─── 任务列表管理 ───────────────────────────────────────────────────
 
-    return "\n".join(parts)
+def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
+                       timeout: int, agent_args: Optional[list]) -> Optional[List[dict]]:
+    """
+    让 AI 扫描代码库并生成完整任务列表。
+    返回解析后的任务列表，失败返回 None。
+    """
+    cprint(f"\n{'─' * 55}", C.CYAN)
+    cprint(f"  📋 规划阶段：扫描代码库，生成任务列表...", C.BOLD + C.CYAN)
+    cprint(f"{'─' * 55}", C.CYAN)
+
+    success, summary, raw_output, elapsed = call_agent(
+        agent, PLAN_PROMPT, target_dir, ext_filter, timeout, agent_args,
+        quiet=True,
+    )
+
+    cprint(f"  ⏱ 规划耗时 {elapsed:.1f}s", C.CYAN)
+
+    if not success:
+        cprint(f"  ⚠ 规划失败: {summary}", C.YELLOW)
+        return None
+
+    # 从输出中提取 JSON
+    tasks = _extract_json_tasks(raw_output)
+    if tasks is None:
+        # 尝试把整段输出当 JSON 解析
+        cprint(f"  ⚠ 无法从 Agent 输出中提取任务 JSON，尝试直接解析...", C.YELLOW)
+        tasks = _try_parse_json(raw_output)
+
+    if tasks is None:
+        cprint(f"  ⚠ 无法解析任务列表，将回退到逐轮模式", C.YELLOW)
+        return None
+
+    return tasks
+
+
+def _extract_json_tasks(text: str) -> Optional[List[dict]]:
+    """从 agent 输出中提取 JSON 任务列表"""
+    # 尝试匹配 JSON 块（可能被 markdown 包裹）
+    # 匹配 ```json ... ``` 或无标记的 JSON
+    patterns = [
+        r'```(?:json)?\s*\n(.*?)\n```',  # markdown 代码块
+        r'\{[\s\S]*"tasks"[\s\S]*\}',     # 直接 JSON 对象
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            json_str = m.group(1) if m.lastindex else m.group(0)
+            result = _try_parse_json(json_str)
+            if result:
+                return result
+    return None
+
+
+def _try_parse_json(json_str: str) -> Optional[List[dict]]:
+    """尝试解析 JSON 字符串并提取 tasks 数组"""
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        # 尝试修复常见问题：去掉尾部逗号等
+        try:
+            cleaned = re.sub(r',\s*}', '}', json_str)
+            cleaned = re.sub(r',\s*]', ']', cleaned)
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+    if isinstance(data, dict) and "tasks" in data:
+        return data["tasks"]
+    if isinstance(data, list):
+        return data
+    return None
+
+
+def save_task_list(target_dir: str, tasks: List[dict]):
+    """将任务列表保存到 AI-TASKS.md"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "# AI 任务列表",
+        f"生成时间: {ts}",
+        "",
+        f"共 {len(tasks)} 个任务",
+        "",
+    ]
+
+    # 按状态分组
+    pending = []
+    done = []
+    for t in tasks:
+        if t.get("status") == "done":
+            done.append(t)
+        else:
+            pending.append(t)
+
+    if pending:
+        lines.append("## 待执行")
+        lines.append("")
+        for t in pending:
+            prio = t.get("priority", "medium")
+            tid = t.get("id", "?")
+            title = t.get("title", "")
+            desc = t.get("description", "")
+            ttype = t.get("type", "")
+            lines.append(f"- [ ] **#{tid}** [{prio}] [{ttype}] {title}")
+            lines.append(f"  {desc}")
+            lines.append("")
+
+    if done:
+        lines.append("## 已完成")
+        lines.append("")
+        for t in done:
+            tid = t.get("id", "?")
+            title = t.get("title", "")
+            round_num = t.get("completed_round", "?")
+            lines.append(f"- [x] **#{tid}** {title} (Round {round_num})")
+            lines.append("")
+
+    path = Path(target_dir) / TASK_FILE
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def load_task_list(target_dir: str) -> Optional[List[dict]]:
+    """从 AI-TASKS.md 加载任务列表，返回带状态的任务列表"""
+    path = Path(target_dir) / TASK_FILE
+    if not path.is_file():
+        return None
+
+    content = path.read_text(encoding="utf-8")
+    tasks = []
+
+    # 解析 markdown 列表项
+    # - [ ] **#1** [high] [修复类] 标题
+    #   描述
+    pattern = r'- \[([ x])\] \*\*#(\d+)\*\* (?:\[([^\]]+)\] )?(?:\[([^\]]+)\])? ?(.+?)(?:\n  (.+?))?(?=\n- |\n##|\Z)'
+
+    for m in re.finditer(pattern, content, re.DOTALL):
+        status = "done" if m.group(1) == "x" else "pending"
+        tid = int(m.group(2))
+        priority = m.group(3) or "medium"
+        ttype = m.group(4) or ""
+        title = m.group(5).strip()
+        desc = m.group(6).strip() if m.group(6) else ""
+
+        # 尝试从已完成项中提取 round 号
+        completed_round = None
+        if status == "done":
+            round_match = re.search(r'Round (\d+)', m.group(0))
+            if round_match:
+                completed_round = int(round_match.group(1))
+
+        tasks.append({
+            "id": tid,
+            "status": status,
+            "priority": priority,
+            "type": ttype,
+            "title": title,
+            "description": desc,
+            "completed_round": completed_round,
+        })
+
+    return tasks if tasks else None
+
+
+def mark_task_done(target_dir: str, task_id: int, round_num: int):
+    """在任务列表中标记某个任务为已完成"""
+    tasks = load_task_list(target_dir)
+    if not tasks:
+        return
+
+    for t in tasks:
+        if t["id"] == task_id:
+            t["status"] = "done"
+            t["completed_round"] = round_num
+            break
+
+    save_task_list(target_dir, tasks)
+
+
+def get_next_pending_task(target_dir: str) -> Optional[dict]:
+    """获取下一个待执行的任务"""
+    tasks = load_task_list(target_dir)
+    if not tasks:
+        return None
+
+    for t in tasks:
+        if t.get("status") != "done":
+            return t
+    return None
 
 
 # ─── 文件过滤参数 ─────────────────────────────────────────────────────
@@ -450,10 +649,13 @@ def cprint(msg: str, color: str = ""):
 def call_agent(agent: str, prompt: str, target_dir: str,
                ext_filter: Optional[str] = None,
                timeout: int = 600,
-               extra_args: Optional[list] = None) -> tuple[bool, str, str, float]:
+               extra_args: Optional[list] = None,
+               quiet: bool = False) -> tuple[bool, str, str, float]:
     """
     调用 agent 进行一轮修改。
     返回 (success, summary, raw_output, elapsed_seconds)
+
+    quiet=True 时不打印 agent 的原始输出（不打印 prompt 和冗余输出）。
     """
     cfg = AGENTS[agent]
 
@@ -462,15 +664,11 @@ def call_agent(agent: str, prompt: str, target_dir: str,
     if ext_filter:
         full_prompt = ext_filter + "\n\n" + prompt
 
-    # 将额外参数放在 agent 自身参数之前，避免 -p 等标志错误地消费
-    # 额外参数的内容（如 --model gpt-4o）。正确顺序：
-    #   pi --model gpt-4o -p "prompt"（而非 pi -p --model gpt-4o "prompt"）
     cmd_parts = [cfg["cmd"]]
     if extra_args:
         cmd_parts.extend(extra_args)
     cmd_parts.extend(cfg["args"])
 
-    # 处理 cwd
     if cfg["cwd_option"]:
         cmd_parts.extend([cfg["cwd_option"], target_dir])
         cwd = None
@@ -479,7 +677,12 @@ def call_agent(agent: str, prompt: str, target_dir: str,
 
     cmd_parts.append(full_prompt)
 
-    cprint(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...", C.CYAN)
+    if not quiet:
+        cprint(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...", C.CYAN)
+    else:
+        # 静默模式只显示简短提示
+        prompt_preview = prompt[:80].replace('\n', ' ')
+        cprint(f"  🚀 {agent} 工作中... ({prompt_preview}...)", C.CYAN)
 
     start = time.time()
     try:
@@ -491,32 +694,34 @@ def call_agent(agent: str, prompt: str, target_dir: str,
             text=True,
         )
 
-        # 使用 communicate() 替代 for 循环 + wait，这样才能真正落实超时。
-        # for line in proc.stdout 会一直阻塞到 stdout 关闭，如果进程挂死，
-        # 超时机制永远不会触发。communicate() 在内部用 select/线程同时处理
-        # 读取和等待，是 Python 官方推荐的正确方式。
         stdout_data, _ = proc.communicate(timeout=timeout)
         elapsed = time.time() - start
 
-        if stdout_data:
-            print(stdout_data, end="", flush=True)
+        # 静默模式不打印原始输出，只显示最后几行摘要
+        if not quiet:
+            if stdout_data:
+                print(stdout_data, end="", flush=True)
+        else:
+            # 静默模式下只显示最后 5 行，避免刷屏
+            if stdout_data:
+                lines = stdout_data.strip().split('\n')
+                tail = lines[-5:] if len(lines) > 5 else lines
+                if tail:
+                    print("\n".join(tail))
 
         summary = parse_summary(stdout_data)
-        # Agent 非零退出但输出中没有有效 SUMMARY 时，parse_summary 会返回
-        # 通用描述，这对失败场景有误导性。此时用明确的失败描述替换。
         if proc.returncode != 0 and "未提供具体说明" in summary:
             summary = f"Agent 异常退出（返回码 {proc.returncode}），未提供改动说明"
         return proc.returncode == 0, summary, stdout_data, elapsed
 
     except subprocess.TimeoutExpired:
         proc.kill()
-        # 超时后尝试收集子进程已产生的部分输出
         try:
             partial_stdout, _ = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             partial_stdout = ""
         elapsed = time.time() - start
-        if partial_stdout:
+        if not quiet and partial_stdout:
             print(partial_stdout, end="", flush=True)
         cprint(f"\n  Agent 超时（{timeout} 秒）", C.RED)
         return False, "Agent 执行超时", partial_stdout, elapsed
@@ -585,10 +790,11 @@ def run_loop(
     agent_args: Optional[list] = None,
     resume: bool = False,
     keep_backups: int = 0,
+    no_plan: bool = False,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
-    cprint("║      AI 自迭代控制器 v2.0               ║", C.CYAN)
+    cprint("║      AI 自迭代控制器 v2.1               ║", C.CYAN)
     cprint("╚══════════════════════════════════════════╝", C.CYAN)
     print()
     cprint(f"  目标目录 : {target_dir}", C.BOLD)
@@ -603,6 +809,8 @@ def run_loop(
             cprint(f"  备份保留 : 最近 {keep_backups} 个", C.BOLD)
     if is_git_repo(target_dir) and not no_git:
         cprint(f"  Git      : 自动 commit", C.BOLD)
+    if no_plan:
+        cprint(f"  模式     : 逐轮模式（无任务列表）", C.BOLD)
     print()
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
@@ -615,11 +823,175 @@ def run_loop(
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
         cprint("  ⚠ 警告: 工作区存在未提交的改动，将与 AI 改动混合记录", C.YELLOW)
 
+    # ─── 逐轮模式（--no-plan）：保持原有行为 ───
+    if no_plan:
+        _run_legacy_loop(
+            target_dir, agent, max_rounds, allowed_ext,
+            no_backup, no_git, sleep_between, timeout,
+            agent_args, resume, keep_backups, ext_filter,
+        )
+        return
+
+    # ─── 两阶段模式：先规划，再逐条执行 ───
+
+    # 阶段 1：生成任务列表
+    tasks = None
+    if resume:
+        tasks = load_task_list(target_dir)
+        if tasks:
+            pending = [t for t in tasks if t.get("status") != "done"]
+            cprint(f"  恢复模式 : 从任务列表恢复（已完成 {len(tasks) - len(pending)}/{len(tasks)} 个任务）", C.BOLD + C.CYAN)
+            if not pending:
+                cprint(f"  ✓ 任务列表中所有任务已完成，退出。", C.GREEN)
+                return
+        else:
+            cprint("  ⚠ 无法加载任务列表，将重新生成。", C.YELLOW)
+
+    if tasks is None:
+        tasks = generate_task_list(target_dir, ext_filter, timeout, agent_args)
+        if tasks is None:
+            cprint("  ⚠ 任务列表生成失败，回退到逐轮模式", C.YELLOW)
+            _run_legacy_loop(
+                target_dir, agent, max_rounds, allowed_ext,
+                no_backup, no_git, sleep_between, timeout,
+                agent_args, False, keep_backups, ext_filter,
+            )
+            return
+
+        if len(tasks) == 0:
+            cprint(f"\n  ✓ AI 评估后认为代码库已完善，无需改进", C.GREEN)
+            return
+
+        save_task_list(target_dir, tasks)
+        cprint(f"  ✓ 任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}", C.GREEN)
+        # 打印任务概览
+        for t in tasks[:10]:
+            cprint(f"    #{t.get('id')} [{t.get('priority', '?')}] {t.get('title', '')}", C.CYAN)
+        if len(tasks) > 10:
+            cprint(f"    ... 还有 {len(tasks) - 10} 个任务", C.CYAN)
+
+    # 阶段 2：逐条执行任务
+    round_num = parse_changelog_for_resume(target_dir)
+    round_num = round_num[0] if round_num else 0
+    consecutive_noops = 0
+
+    while True:
+        # 获取下一个待执行任务
+        task = get_next_pending_task(target_dir)
+        if task is None:
+            cprint(f"\n  ✓ 所有任务已完成！🎉", C.GREEN)
+            break
+
+        round_num += 1
+
+        if max_rounds > 0 and round_num > max_rounds:
+            pending_left = len([t for t in (load_task_list(target_dir) or []) if t.get("status") != "done"])
+            cprint(f"\n  ✓ 达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。", C.GREEN)
+            break
+
+        if consecutive_noops >= 3:
+            cprint(f"\n  ✓ 连续 {consecutive_noops} 轮无改动，退出。", C.GREEN)
+            break
+
+        tid = task.get("id", "?")
+        title = task.get("title", "")
+
+        cprint(f"\n{'─' * 55}", C.CYAN)
+        cprint(f"  第 {round_num} 轮: 执行任务 #{tid} — {title}", C.BOLD + C.CYAN)
+        cprint(f"{'─' * 55}", C.CYAN)
+
+        # 备份
+        if not no_backup:
+            backup_folder = backup_all(target_dir, round_num)
+            if backup_folder:
+                cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
+            if keep_backups > 0:
+                cleanup_old_backups(target_dir, keep_backups)
+
+        git_repo = is_git_repo(target_dir) and not no_git
+        before_ts = time.time()
+
+        # 构建任务 prompt
+        prompt = build_task_prompt(task)
+        success, summary, raw_output, elapsed = call_agent(
+            agent, prompt, target_dir, ext_filter, timeout, agent_args,
+            quiet=True,
+        )
+
+        print()
+
+        changed_files = get_changed_files(target_dir, before_ts)
+        has_diff = bool(changed_files)
+
+        if not success and not has_diff:
+            cprint(f"  Agent 返回异常，跳过此任务...", C.YELLOW)
+            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
+            consecutive_noops += 1
+            time.sleep(sleep_between)
+            continue
+
+        if not success and has_diff:
+            cprint(f"  Agent 返回异常但仍有文件改动，继续处理...", C.YELLOW)
+
+        if has_diff:
+            filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
+            if bad_files:
+                cprint(f"  ⚠ Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
+                       f"{', '.join(bad_files[:5])}"
+                       f"{' ...' if len(bad_files) > 5 else ''}", C.YELLOW)
+                suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件]"
+                summary = summary + suffix_note
+
+            if git_repo:
+                diff_stat = get_git_diff_summary(target_dir)
+            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", changed_files, elapsed)
+            if git_repo:
+                git_commit(target_dir, round_num)
+                if diff_stat:
+                    cprint(f"  ✓ 改动: {diff_stat}", C.GREEN)
+                else:
+                    cprint(f"  ✓ 已提交改动", C.GREEN)
+            else:
+                cprint(f"  ✓ 修改了 {len(changed_files)} 个文件", C.GREEN)
+
+            cprint(f"  📝 {summary}", C.MAGENTA)
+            cprint(f"  📄 {', '.join(changed_files[:5])}"
+                   f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
+
+            # 标记任务完成
+            mark_task_done(target_dir, task["id"], round_num)
+            consecutive_noops = 0
+        else:
+            cprint(f"  本轮无文件改动", C.YELLOW)
+            cprint(f"  AI 说明: {summary}", C.MAGENTA)
+            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
+            # 无改动时也标记完成，避免死循环在同一个任务上
+            mark_task_done(target_dir, task["id"], round_num)
+            consecutive_noops += 1
+
+        cprint(f"  ⏳ 等待 {sleep_between}s...", C.CYAN)
+        time.sleep(sleep_between)
+
+
+def _run_legacy_loop(
+    target_dir: str,
+    agent: str,
+    max_rounds: int,
+    allowed_ext: Optional[set],
+    no_backup: bool,
+    no_git: bool,
+    sleep_between: float,
+    timeout: int,
+    agent_args: Optional[list],
+    resume: bool,
+    keep_backups: int,
+    ext_filter: Optional[str],
+):
+    """原有的逐轮模式：每轮让 AI 自己选一件事来做。"""
     consecutive_noops = 0
     round_num = 0
     prev_summary = ""
 
-    # --resume 模式：从 changelog 解析上次进度，从下一轮继续
     if resume:
         resume_info = parse_changelog_for_resume(target_dir)
         if resume_info is None:
@@ -629,8 +1001,8 @@ def run_loop(
             if max_rounds > 0 and last_round >= max_rounds:
                 cprint(f"  ✓ 上次已完成 {last_round}/{max_rounds} 轮，无需恢复。", C.GREEN)
                 return
-            round_num = last_round       # 循环开头 +1 后从 last_round+1 开始
-            prev_summary = last_summary  # 将上轮改动传入下一轮作为上下文
+            round_num = last_round
+            prev_summary = last_summary
             cprint(f"  恢复模式 : 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）", C.BOLD + C.CYAN)
             print()
 
@@ -649,36 +1021,41 @@ def run_loop(
         cprint(f"  第 {round_num} 轮迭代{' (无限)' if max_rounds == 0 else f' / {max_rounds}'}", C.BOLD + C.CYAN)
         cprint(f"{'─' * 55}", C.CYAN)
 
-        # 备份（每轮开始前）
         if not no_backup:
             backup_folder = backup_all(target_dir, round_num)
             if backup_folder:
                 cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
-            # 清理旧备份，只保留最近 keep_backups 个
             if keep_backups > 0:
                 cleanup_old_backups(target_dir, keep_backups)
 
-        # 记录改动前的 git 状态
         git_repo = is_git_repo(target_dir) and not no_git
-
-        # 记录时间戳，用于非 git 目录下的文件改动检测
         before_ts = time.time()
 
-        # 调用 agent
-        prompt = build_round_prompt(round_num, max_rounds, prev_summary)
+        # 构建每轮通用 prompt
+        parts = [TASK_PROMPT]
+        round_info = f"\n\n## 当前迭代上下文\n\n这是第 {round_num} 轮"
+        if max_rounds > 0:
+            round_info += f" / 共 {max_rounds} 轮"
+        round_info += "。扫描代码库，找出优先级最高的一个改进点并实现它。"
+        parts.append(round_info)
+        if prev_summary:
+            parts.append(
+                f"\n上一轮 AI 完成的改动: {prev_summary}\n"
+                f"请不要再做相同的改动，继续寻找新的改进点。"
+            )
+        prompt = "\n".join(parts)
+
         success, summary, raw_output, elapsed = call_agent(
             agent, prompt, target_dir, ext_filter, timeout, agent_args,
+            quiet=True,
         )
 
-        print()  # 换行
+        print()
 
-        # 无论 Agent 是否成功，都先检测文件改动。
-        # Agent 可能在报错前已经修改了文件，这些改动不应被忽略。
         changed_files = get_changed_files(target_dir, before_ts)
         has_diff = bool(changed_files)
 
         if not success and not has_diff:
-            # Agent 失败且无文件改动 —— 真正的失败，计入无操作次数
             cprint(f"  Agent 返回异常，等待后继续...", C.YELLOW)
             write_round_log(target_dir, round_num, summary, [], elapsed)
             consecutive_noops += 1
@@ -687,18 +1064,14 @@ def run_loop(
             continue
 
         if not success and has_diff:
-            # Agent 失败但产生了文件改动 —— 部分成功，按正常改动处理
             cprint(f"  Agent 返回异常但仍有文件改动，继续处理...", C.YELLOW)
 
-        # 以下处理有文件改动或无改动的正常情况
         if has_diff:
-            # 校验文件后缀过滤规则：如果用户指定了 --ext，检查 Agent 是否遵守
             filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
             if bad_files:
                 cprint(f"  ⚠ Agent 修改了 {len(bad_files)} 个非目标后缀文件 (--ext 过滤): "
                        f"{', '.join(bad_files[:5])}"
                        f"{' ...' if len(bad_files) > 5 else ''}", C.YELLOW)
-                # 将不匹配文件追加到改动说明中，记录在 changelog 里
                 suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件: " \
                               f"{', '.join(bad_files[:5])}"
                 if len(bad_files) > 5:
@@ -706,10 +1079,6 @@ def run_loop(
                 suffix_note += "]"
                 summary = summary + suffix_note
 
-            # 关键顺序说明：
-            # 1. get_git_diff_summary 最先 —— 避免 changelog 自身的变更污染 diff 摘要
-            # 2. write_round_log 在 commit 之前 —— 确保当轮 changelog 随改动一起提交
-            # 3. git_commit 最后 —— 将所有改动（含 changelog）一并提交
             if git_repo:
                 diff_stat = get_git_diff_summary(target_dir)
             write_round_log(target_dir, round_num, summary, changed_files, elapsed)
@@ -747,10 +1116,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             示例:
-              python ai_controller.py ./my-project --agent pi --max-rounds 10
-              python ai_controller.py ./my-project --agent opencode --max-rounds 0
-              python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
-              python ai_controller.py ./my-project --agent codex --max-rounds 3
+              python ai_controller.py ./my-project --agent pi --max-rounds 10    # 默认：先规划再执行
+              python ai_controller.py ./my-project --agent pi --plan-only        # 仅生成任务列表
+              python ai_controller.py ./my-project --agent pi --no-plan          # 传统逐轮模式
+              python ai_controller.py ./my-project --agent pi --resume           # 恢复迭代
         """),
     )
     parser.add_argument("directory", help="目标代码目录")
@@ -774,6 +1143,10 @@ def main():
                         help="从中断处恢复：读取 changelog 找到上次进度，从下一轮继续迭代")
     parser.add_argument("--keep-backups", type=int, default=0,
                         help="只保留最近 N 个备份，旧备份自动清理（0=不限制，默认 0）")
+    parser.add_argument("--no-plan", action="store_true",
+                        help="跳过任务列表规划阶段，使用传统逐轮模式（每轮 AI 自行选择改进点）")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="只生成任务列表 AI-TASKS.md，不执行")
 
     args = parser.parse_args()
 
@@ -818,6 +1191,25 @@ def main():
             if e:
                 allowed_ext.add(e)
 
+    # --plan-only：只生成任务列表
+    if args.plan_only:
+        print()
+        cprint("╔══════════════════════════════════════════╗", C.CYAN)
+        cprint("║      AI 自迭代控制器 v2.1 (仅规划)       ║", C.CYAN)
+        cprint("╚══════════════════════════════════════════╝", C.CYAN)
+        print()
+        ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
+        tasks = generate_task_list(str(target), ext_filter, args.timeout, agent_args)
+        if tasks is None:
+            cprint("\n规划失败，未能生成任务列表。", C.RED)
+            sys.exit(1)
+        if len(tasks) == 0:
+            cprint("\n✓ AI 评估后认为代码库已完善，无需改进。", C.GREEN)
+        else:
+            save_task_list(str(target), tasks)
+            cprint(f"\n✓ 任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）", C.GREEN)
+        sys.exit(0)
+
     try:
         run_loop(
             target_dir=str(target),
@@ -831,6 +1223,7 @@ def main():
             agent_args=agent_args,
             resume=args.resume,
             keep_backups=args.keep_backups,
+            no_plan=args.no_plan,
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
