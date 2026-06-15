@@ -135,43 +135,94 @@ def save_task_list(target_dir: str, tasks: List[dict]):
 
 
 def load_task_list(target_dir: str) -> Optional[List[dict]]:
-    """从 AI-TASKS.md 加载任务列表，返回带状态的任务列表"""
+    """从 AI-TASKS.md 加载任务列表，返回带状态的任务列表
+
+    采用逐行解析替代单个复杂正则表达式，按前缀识别标记：
+    - 以 "- [ ]" 或 "- [x]" 开头的行识别为任务条目
+    - 以 "  "（两个空格）开头的行识别为描述续行
+    - 以 "##" 开头的行识别为节标题（终止当前任务描述收集）
+    """
     path = Path(target_dir) / TASK_FILE
     if not path.is_file():
         return None
 
     content = path.read_text(encoding="utf-8")
     tasks = []
+    current_task = None  # 当前正在构建的任务
 
-    # 解析 markdown 列表项
-    # - [ ] **#1** [high] [修复类] 标题
-    #   描述
-    pattern = r'- \[([ x])\] \*\*#(\d+)\*\* (?:\[([^\]]+)\] )?(?:\[([^\]]+)\])? ?(.+?)(?:\n  (.+?))?(?=\n- |\n##|\Z)'
+    for line in content.split("\n"):
+        # 识别任务条目行：- [ ] 或 - [x]
+        task_match = re.match(r'- \[([ x])\] (.+)$', line)
+        if task_match:
+            # 保存上一个任务
+            if current_task is not None:
+                tasks.append(current_task)
+                current_task = None
 
-    for m in re.finditer(pattern, content, re.DOTALL):
-        status = "done" if m.group(1) == "x" else "pending"
-        tid = int(m.group(2))
-        priority = m.group(3) or "medium"
-        ttype = m.group(4) or ""
-        title = m.group(5).strip()
-        desc = m.group(6).strip() if m.group(6) else ""
+            status = "done" if task_match.group(1) == "x" else "pending"
+            rest = task_match.group(2)
 
-        # 尝试从已完成项中提取 round 号
-        completed_round = None
-        if status == "done":
-            round_match = re.search(r'Round (\d+)', m.group(0))
-            if round_match:
-                completed_round = int(round_match.group(1))
+            # 提取 **#N**
+            id_match = re.match(r'\*\*#(\d+)\*\*\s*(.*)$', rest)
+            if not id_match:
+                continue
+            tid = int(id_match.group(1))
+            tail = id_match.group(2)
 
-        tasks.append({
-            "id": tid,
-            "status": status,
-            "priority": priority,
-            "type": ttype,
-            "title": title,
-            "description": desc,
-            "completed_round": completed_round,
-        })
+            priority = "medium"
+            ttype = ""
+            title = ""
+            completed_round = None
+
+            if status == "done":
+                # 已完成任务格式: title (Round N)，无 priority/type 标签
+                round_match = re.search(r'\s*\(Round (\d+)\)\s*$', tail)
+                if round_match:
+                    completed_round = int(round_match.group(1))
+                    title = tail[:round_match.start()].strip()
+                else:
+                    title = tail.strip()
+            else:
+                # 待执行任务格式: [priority] [type] title
+                # 按顺序解析方括号标签，最多两个（priority, type）
+                remaining = tail
+                tags_found = 0
+                while remaining.startswith("["):
+                    bm = re.match(r'\[([^\]]+)\]\s*', remaining)
+                    if not bm:
+                        break
+                    tag = bm.group(1)
+                    remaining = remaining[bm.end():]
+                    if tags_found == 0:
+                        priority = tag
+                    else:
+                        ttype = tag
+                    tags_found += 1
+                title = remaining.strip()
+
+            current_task = {
+                "id": tid,
+                "status": status,
+                "priority": priority,
+                "type": ttype,
+                "title": title,
+                "description": "",
+                "completed_round": completed_round,
+            }
+            continue
+
+        # 识别描述续行（以两个空格开头且非空）
+        if current_task is not None and line.startswith("  ") and line.strip():
+            desc_line = line.strip()
+            if current_task["description"]:
+                current_task["description"] += "\n" + desc_line
+            else:
+                current_task["description"] = desc_line
+            continue
+
+    # 保存最后一个任务
+    if current_task is not None:
+        tasks.append(current_task)
 
     return tasks if tasks else None
 
