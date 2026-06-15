@@ -116,3 +116,12 @@
 
 *耗时 213.5s*
 
+## Round 6 — 2026-06-15 11:43:12
+
+**改动说明**: 新增 extract_model_hint 函数从 --agent-args 中提取 --model/-m 参数值，写入 changelog 头部和启动横幅，补齐了 init_log 预留的 model_hint 参数但从未传入的功能缺口，让用户能一目了然每次迭代使用了哪个模型
+
+**改动文件** (1 个):
+- `i_controller.py`
+
+*耗时 93.9s*
+

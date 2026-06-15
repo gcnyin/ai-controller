@@ -252,6 +252,30 @@ def parse_summary(output: str) -> str:
     return "AI 完成了代码改进（未提供具体说明）"
 
 
+def extract_model_hint(agent_args: Optional[list]) -> str:
+    """从 agent 额外参数中提取模型信息，用于 changelog 头部显示。
+
+    支持 --model <name> 和 -m <name> 两种写法。
+    如果同时出现多个，取最后一个。
+    """
+    if not agent_args:
+        return ""
+    # 迭代查找 --model / -m，取最后出现的值
+    hint = ""
+    i = 0
+    while i < len(agent_args):
+        arg = agent_args[i]
+        if arg in ("--model", "-m") and i + 1 < len(agent_args):
+            hint = agent_args[i + 1]
+            i += 2
+            continue
+        # 处理 --model=xxx 写法
+        if arg.startswith("--model=") or arg.startswith("-m="):
+            hint = arg.split("=", 1)[1]
+        i += 1
+    return hint
+
+
 def init_log(target_dir: str, agent: str, model_hint: str = ""):
     """初始化 changelog 文件"""
     log_path = Path(target_dir) / LOG_FILE
@@ -579,7 +603,10 @@ def run_loop(
     print()
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
-    init_log(target_dir, agent)
+    model_hint = extract_model_hint(agent_args)
+    init_log(target_dir, agent, model_hint)
+    if model_hint:
+        cprint(f"  模型     : {model_hint}", C.BOLD)
 
     # 检查工作区是否有未提交的改动，如有则警告用户
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
