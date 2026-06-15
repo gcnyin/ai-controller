@@ -365,7 +365,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
                 capture_output=True, text=True, timeout=10,
             )
             files = []
-            for line in r.stdout.strip().split("\n"):
+            for line in r.stdout.splitlines():
                 if not line.strip():
                     continue
                 # git status --porcelain: "XY filename" -- X=staged, Y=unstaged
