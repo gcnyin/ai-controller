@@ -37,6 +37,9 @@ python ai_controller.py ./my-project --agent codex --max-rounds 3
 
 # pi 指定模型和 provider
 python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --provider openai'
+
+# 中断后恢复，从上次断点继续
+python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
 ```
 
 ## 参数
@@ -52,6 +55,7 @@ python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --p
 | `--no-backup` | 不备份 | false |
 | `--no-git` | 不自动 git commit | false |
 | `--agent-args` | 传递给 Agent 的额外参数，用引号包裹 | - |
+| `--resume` | 中断后恢复：读取 changelog 从下一轮继续 | false |
 
 ## 工作流程
 
@@ -81,6 +85,19 @@ python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --p
             ▼
       下一轮 ↻ (或无改动3次退出)
 ```
+
+## 中断恢复
+
+Ctrl+C 中断后，可以带 `--resume` 重新运行，控制器会读取 `AI-CHANGELOG.md` 自动找到上次断点，从下一轮继续。
+
+```bash
+# 比如跑 10 轮，第 5 轮被中断了
+python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
+# 输出: 恢复模式 : 从第 6 轮继续（上次完成 5 轮）
+```
+
+- 恢复时会把上一轮的改动说明传给 AI，避免重复做相同的事
+- 如果 changelog 中已无更多轮次可恢复（如已完成全部轮次），会直接退出
 
 ## 退出条件
 

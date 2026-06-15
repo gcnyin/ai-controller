@@ -17,9 +17,13 @@ AI 自迭代控制器 —— 调用 pi/opencode/claude/codex 让 AI 自动循环
 
     # codex 跑 3 轮
     python ai_controller.py ./my-project --agent codex --max-rounds 3
+
+    # 从中断处恢复继续迭代
+    python ai_controller.py ./my-project --agent pi --resume
 """
 
 import os
+import re
 import sys
 import time
 import shutil
@@ -29,7 +33,7 @@ import textwrap
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 BACKUP_DIR_NAME = ".ai-controller-backups"
 
@@ -240,6 +244,42 @@ def init_log(target_dir: str, agent: str, model_hint: str = ""):
         f"---\n\n",
         encoding="utf-8",
     )
+
+
+def parse_changelog_for_resume(target_dir: str) -> Optional[Tuple[int, str]]:
+    """解析 AI-CHANGELOG.md，提取最后一轮的轮次号和改动说明。
+
+    用于 --resume 模式：读取已有的 changelog，找到最后完成的轮次，
+    从下一轮继续迭代，并将上一轮的改动说明作为上下文传入。
+
+    Returns:
+        (last_round_num, last_summary) 或 None（changelog 不存在或无法解析）
+    """
+    log_path = Path(target_dir) / LOG_FILE
+    if not log_path.is_file():
+        return None
+
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    # 匹配 "## Round N — YYYY-MM-DD HH:MM:SS" 后面跟着 "**改动说明**: ..." 或 "改动说明: ..."
+    # 使用 DOTALL 以确保改动说明跨行时也能正确捕获
+    pattern = r'## Round (\d+) — [^\n]*\n+\n\*{0,2}改动说明\*{0,2}[:：]\s*(.+?)(?:\n\n|\n##|\n\*|$)'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    if not matches:
+        return None
+
+    # 取最后一组匹配
+    last_round_str, last_summary = matches[-1]
+    try:
+        last_round = int(last_round_str)
+    except ValueError:
+        return None
+
+    return last_round, last_summary.strip()
 
 
 def write_round_log(
@@ -496,6 +536,7 @@ def run_loop(
     sleep_between: float = 2.0,
     timeout: int = 600,
     agent_args: Optional[list] = None,
+    resume: bool = False,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
@@ -524,6 +565,21 @@ def run_loop(
     consecutive_noops = 0
     round_num = 0
     prev_summary = ""
+
+    # --resume 模式：从 changelog 解析上次进度，从下一轮继续
+    if resume:
+        resume_info = parse_changelog_for_resume(target_dir)
+        if resume_info is None:
+            cprint("  ⚠ 无法解析 changelog 中的进度信息，从头开始。", C.YELLOW)
+        else:
+            last_round, last_summary = resume_info
+            if max_rounds > 0 and last_round >= max_rounds:
+                cprint(f"  ✓ 上次已完成 {last_round}/{max_rounds} 轮，无需恢复。", C.GREEN)
+                return
+            round_num = last_round       # 循环开头 +1 后从 last_round+1 开始
+            prev_summary = last_summary  # 将上轮改动传入下一轮作为上下文
+            cprint(f"  恢复模式 : 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）", C.BOLD + C.CYAN)
+            print()
 
     while True:
         round_num += 1
@@ -654,6 +710,8 @@ def main():
                         help="不自动 git commit")
     parser.add_argument("--agent-args", default="",
                         help="传递给 Agent 的额外参数，用引号包裹，如 --agent-args '--model gpt-4'")
+    parser.add_argument("--resume", action="store_true",
+                        help="从中断处恢复：读取 changelog 找到上次进度，从下一轮继续迭代")
 
     args = parser.parse_args()
 
@@ -695,6 +753,7 @@ def main():
             sleep_between=args.sleep,
             timeout=args.timeout,
             agent_args=agent_args,
+            resume=args.resume,
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
