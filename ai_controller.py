@@ -468,11 +468,13 @@ def call_agent(agent: str, prompt: str, target_dir: str,
     if ext_filter:
         full_prompt = ext_filter + "\n\n" + prompt
 
-    cmd_parts = [cfg["cmd"]] + cfg["args"]
-
-    # 追加用户传入的额外参数（如 --model, --verbose）
+    # 将额外参数放在 agent 自身参数之前，避免 -p 等标志错误地消费
+    # 额外参数的内容（如 --model gpt-4o）。正确顺序：
+    #   pi --model gpt-4o -p "prompt"（而非 pi -p --model gpt-4o "prompt"）
+    cmd_parts = [cfg["cmd"]]
     if extra_args:
         cmd_parts.extend(extra_args)
+    cmd_parts.extend(cfg["args"])
 
     # 处理 cwd
     if cfg["cwd_option"]:
