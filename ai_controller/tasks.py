@@ -2,9 +2,10 @@
 
 import re
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from . import C, cprint
 from .logger import get_logger
@@ -12,6 +13,7 @@ from .agent import call_agent
 from .prompts import PLAN_PROMPT
 
 TASK_FILE = "AI-TASKS.md"
+TASK_FILE_BAK = "AI-TASKS.md.bak"
 
 
 def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
@@ -47,6 +49,15 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
         return None
 
     return tasks
+
+
+def backup_task_file(target_dir: str):
+    """备份现有 AI-TASKS.md 为 AI-TASKS.md.bak（用于 --replan）。"""
+    src = Path(target_dir) / TASK_FILE
+    dst = Path(target_dir) / TASK_FILE_BAK
+    if src.is_file():
+        shutil.copy2(src, dst)
+        get_logger().info(f"已备份旧任务列表: {TASK_FILE_BAK}")
 
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:
@@ -87,12 +98,27 @@ def _try_parse_json(json_str: str) -> Optional[List[dict]]:
     return None
 
 
-def save_task_list(target_dir: str, tasks: List[dict]):
-    """将任务列表保存到 AI-TASKS.md"""
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def save_task_list(target_dir: str, tasks: List[dict],
+                   run_count: int = 1,
+                   last_run: str = "",
+                   global_round: int = 0):
+    """将任务列表保存到 AI-TASKS.md。
+
+    Args:
+        run_count: 已运行次数
+        last_run: 最后运行时间字符串（YYYY-MM-DD HH:MM:SS）
+        global_round: 全局轮次计数
+    """
+    gen_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not last_run:
+        last_run = gen_ts
+
     lines = [
         "# AI 任务列表",
-        f"生成时间: {ts}",
+        f"生成时间: {gen_ts}",
+        f"运行次数: {run_count}",
+        f"最后运行: {last_run}",
+        f"全局轮次: {global_round}",
         "",
         f"共 {len(tasks)} 个任务",
         "",
@@ -127,11 +153,58 @@ def save_task_list(target_dir: str, tasks: List[dict]):
             tid = t.get("id", "?")
             title = t.get("title", "")
             round_num = t.get("completed_round", "?")
-            lines.append(f"- [x] **#{tid}** {title} (Round {round_num})")
+            done_ts = t.get("completed_time", "")
+            if done_ts:
+                lines.append(f"- [x] **#{tid}** {title} (Round {round_num}, {done_ts})")
+            else:
+                lines.append(f"- [x] **#{tid}** {title} (Round {round_num})")
             lines.append("")
 
     path = Path(target_dir) / TASK_FILE
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def load_task_metadata(target_dir: str) -> Dict[str, Any]:
+    """从 AI-TASKS.md 头部解析运行元信息。
+
+    Returns:
+        dict 包含:
+            - run_count: int (运行次数，默认 1)
+            - last_run: str (最后运行时间，默认空)
+            - global_round: int (全局轮次，默认 0)
+            - gen_time: str (生成时间，默认空)
+        文件不存在返回空字典。
+    """
+    path = Path(target_dir) / TASK_FILE
+    if not path.is_file():
+        return {}
+
+    content = path.read_text(encoding="utf-8")
+    metadata: Dict[str, Any] = {}
+
+    patterns = {
+        "gen_time": r'^生成时间:\s*(.+)$',
+        "run_count": r'^运行次数:\s*(\d+)$',
+        "last_run": r'^最后运行:\s*(.+)$',
+        "global_round": r'^全局轮次:\s*(\d+)$',
+    }
+
+    for line in content.split("\n"):
+        for key, pat in patterns.items():
+            m = re.match(pat, line)
+            if m:
+                if key in ("run_count", "global_round"):
+                    metadata[key] = int(m.group(1))
+                else:
+                    metadata[key] = m.group(1).strip()
+                break
+
+    metadata.setdefault("run_count", 1)
+    metadata.setdefault("last_run", "")
+    metadata.setdefault("global_round", 0)
+    metadata.setdefault("gen_time", "")
+
+    return metadata
 
 
 def load_task_list(target_dir: str) -> Optional[List[dict]]:
@@ -141,6 +214,10 @@ def load_task_list(target_dir: str) -> Optional[List[dict]]:
     - 以 "- [ ]" 或 "- [x]" 开头的行识别为任务条目
     - 以 "  "（两个空格）开头的行识别为描述续行
     - 以 "##" 开头的行识别为节标题（终止当前任务描述收集）
+
+    已完成任务支持两种格式：
+    - 旧格式: title (Round N)
+    - 新格式: title (Round N, YYYY-MM-DD HH:MM)
     """
     path = Path(target_dir) / TASK_FILE
     if not path.is_file():
@@ -173,15 +250,27 @@ def load_task_list(target_dir: str) -> Optional[List[dict]]:
             ttype = ""
             title = ""
             completed_round = None
+            completed_time = ""
 
             if status == "done":
-                # 已完成任务格式: title (Round N)，无 priority/type 标签
-                round_match = re.search(r'\s*\(Round (\d+)\)\s*$', tail)
+                # 已完成任务格式: title (Round N) 或 title (Round N, YYYY-MM-DD HH:MM)
+                # 先尝试新格式（带时间戳）
+                round_match = re.search(
+                    r'\s*\(Round (\d+),\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\)\s*$',
+                    tail,
+                )
                 if round_match:
                     completed_round = int(round_match.group(1))
+                    completed_time = round_match.group(2)
                     title = tail[:round_match.start()].strip()
                 else:
-                    title = tail.strip()
+                    # 回退到旧格式（仅 Round N）
+                    round_match = re.search(r'\s*\(Round (\d+)\)\s*$', tail)
+                    if round_match:
+                        completed_round = int(round_match.group(1))
+                        title = tail[:round_match.start()].strip()
+                    else:
+                        title = tail.strip()
             else:
                 # 待执行任务格式: [priority] [type] title
                 # 按顺序解析方括号标签，最多两个（priority, type）
@@ -208,6 +297,7 @@ def load_task_list(target_dir: str) -> Optional[List[dict]]:
                 "title": title,
                 "description": "",
                 "completed_round": completed_round,
+                "completed_time": completed_time,
             }
             continue
 
@@ -227,8 +317,34 @@ def load_task_list(target_dir: str) -> Optional[List[dict]]:
     return tasks if tasks else None
 
 
-def mark_task_done(target_dir: str, task_id: int, round_num: int):
-    """在任务列表中标记某个任务为已完成"""
+def mark_task_done(target_dir: str, task_id: int, round_num: int,
+                   tasks: Optional[List[dict]] = None,
+                   run_count: int = 1,
+                   last_run: str = "",
+                   global_round: int = 0):
+    """在任务列表中标记某个任务为已完成。
+
+    若提供 tasks，则原地修改内存列表并写回文件（避免重复读取解析）。
+    否则回退到从文件加载。
+
+    Args:
+        run_count, last_run, global_round: 传递给 save_task_list 的元信息
+    """
+    completed_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if tasks is not None:
+        for t in tasks:
+            if t["id"] == task_id:
+                t["status"] = "done"
+                t["completed_round"] = round_num
+                t["completed_time"] = completed_time
+                break
+        save_task_list(target_dir, tasks,
+                       run_count=run_count, last_run=last_run,
+                       global_round=global_round)
+        return
+
+    # 回退：从文件加载
     tasks = load_task_list(target_dir)
     if not tasks:
         return
@@ -237,13 +353,28 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int):
         if t["id"] == task_id:
             t["status"] = "done"
             t["completed_round"] = round_num
+            t["completed_time"] = completed_time
             break
 
-    save_task_list(target_dir, tasks)
+    save_task_list(target_dir, tasks,
+                   run_count=run_count, last_run=last_run,
+                   global_round=global_round)
 
 
-def get_next_pending_task(target_dir: str) -> Optional[dict]:
-    """获取下一个待执行的任务"""
+def get_next_pending_task(target_dir: str,
+                          tasks: Optional[List[dict]] = None) -> Optional[dict]:
+    """获取下一个待执行的任务。
+
+    若提供 tasks，则直接扫描内存列表（避免重复读取解析文件）。
+    否则回退到从文件加载。
+    """
+    if tasks is not None:
+        for t in tasks:
+            if t.get("status") != "done":
+                return t
+        return None
+
+    # 回退：从文件加载
     tasks = load_task_list(target_dir)
     if not tasks:
         return None

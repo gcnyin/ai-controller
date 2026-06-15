@@ -41,11 +41,14 @@ from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
 from .agent import AGENTS, call_agent, parse_summary
 from .tasks import (
     TASK_FILE,
+    TASK_FILE_BAK,
     generate_task_list,
     save_task_list,
     load_task_list,
+    load_task_metadata,
     mark_task_done,
     get_next_pending_task,
+    backup_task_file,
     _extract_json_tasks,
     _try_parse_json,
 )
@@ -65,6 +68,6 @@ from .cli import (
     check_ext_filter,
     extract_model_hint,
     init_log,
-    parse_changelog_for_resume,
+    write_run_header,
     write_round_log,
 )

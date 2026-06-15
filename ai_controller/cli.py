@@ -19,11 +19,14 @@ from .agent import AGENTS, call_agent
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
 from .tasks import (
     TASK_FILE,
+    TASK_FILE_BAK,
     generate_task_list,
     save_task_list,
     load_task_list,
+    load_task_metadata,
     mark_task_done,
     get_next_pending_task,
+    backup_task_file,
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
 from .git_ops import (
@@ -120,40 +123,22 @@ def init_log(target_dir: str, agent: str, model_hint: str = ""):
     logger.info(f"AI 自迭代控制器启动 — Agent: {agent}{model_str}, 目标: {target_dir}")
 
 
-def parse_changelog_for_resume(target_dir: str) -> Optional[Tuple[int, str]]:
-    """解析 AI-CHANGELOG.md，提取最后一轮的轮次号和改动说明。
+def write_run_header(target_dir: str, run_count: int):
+    """在 changelog 中写入本次运行头部。
 
-    用于 --resume 模式：读取已有的 changelog，找到最后完成的轮次，
-    从下一轮继续迭代，并将上一轮的改动说明作为上下文传入。
-
-    Returns:
-        (last_round_num, last_summary) 或 None（changelog 不存在或无法解析）
+    每次程序调用写入一行运行头部，方便追踪跨运行进度。
     """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"## 运行 #{run_count} — {ts}",
+        "",
+    ]
+
     log_path = Path(target_dir) / LOG_FILE
-    if not log_path.is_file():
-        return None
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
-    try:
-        content = log_path.read_text(encoding="utf-8")
-    except Exception:
-        return None
-
-    # 匹配 "## Round N — YYYY-MM-DD HH:MM:SS" 后面跟着 "**改动说明**: ..." 或 "改动说明: ..."
-    # 使用 DOTALL 以确保改动说明跨行时也能正确捕获
-    pattern = r'## Round (\d+) — [^\n]*\n+\n\*{0,2}改动说明\*{0,2}[:：]\s*(.+?)(?:\n\n|\n##|\n\*|$)'
-    matches = re.findall(pattern, content, re.DOTALL)
-
-    if not matches:
-        return None
-
-    # 取最后一组匹配
-    last_round_str, last_summary = matches[-1]
-    try:
-        last_round = int(last_round_str)
-    except ValueError:
-        return None
-
-    return last_round, last_summary.strip()
+    get_logger().info(f"运行 #{run_count} 开始")
 
 
 def write_round_log(
@@ -228,15 +213,15 @@ def _execute_single_round(
             elapsed: Agent 执行耗时（秒）
             has_diff: 是否有文件改动（Agent 异常且无改动时为 False）
     """
-    # ── 备份 ──
-    if not no_backup:
+    git_repo = is_git_repo(target_dir) and not no_git
+
+    # ── 备份 ──（git 仓库已有版本历史，无需全量备份）
+    if not no_backup and not git_repo:
         backup_folder = backup_all(target_dir, round_num)
         if backup_folder:
             cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
         if keep_backups > 0:
             cleanup_old_backups(target_dir, keep_backups)
-
-    git_repo = is_git_repo(target_dir) and not no_git
     before_ts = time.time()
 
     # ── 调用 Agent ──
@@ -309,14 +294,15 @@ def run_loop(
     sleep_between: float = 2.0,
     timeout: int = 600,
     agent_args: Optional[list] = None,
-    resume: bool = False,
     keep_backups: int = 0,
     no_plan: bool = False,
+    replan: bool = False,
+    tasks_per_run: int = 0,
     dry_run: bool = False,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
-    cprint("║      AI 自迭代控制器 v2.1               ║", C.CYAN)
+    cprint("║      AI 自迭代控制器 v2.2               ║", C.CYAN)
     cprint("╚══════════════════════════════════════════╝", C.CYAN)
     print()
     cprint(f"  目标目录 : {target_dir}", C.BOLD)
@@ -325,14 +311,19 @@ def run_loop(
     cprint(f"  最大轮次 : {'无限' if max_rounds == 0 else max_rounds}", C.BOLD)
     if allowed_ext:
         cprint(f"  文件过滤 : {', '.join(sorted(allowed_ext))}", C.BOLD)
-    if not no_backup:
+    git_repo_for_display = is_git_repo(target_dir) and not no_git
+    if not no_backup and not git_repo_for_display:
         cprint(f"  备份目录 : {BACKUP_DIR_NAME}/", C.BOLD)
         if keep_backups > 0:
             cprint(f"  备份保留 : 最近 {keep_backups} 个", C.BOLD)
+    elif not no_backup and git_repo_for_display:
+        cprint(f"  备份     : 跳过（Git 仓库已有版本历史）", C.BOLD)
     if is_git_repo(target_dir) and not no_git:
         cprint(f"  Git      : 自动 commit", C.BOLD)
     if no_plan:
         cprint(f"  模式     : 逐轮模式（无任务列表）", C.BOLD)
+    if tasks_per_run > 0:
+        cprint(f"  任务限制 : 每次最多 {tasks_per_run} 个", C.BOLD)
     if dry_run:
         cprint(f"  模式     : 预览模式（不实际修改任何文件）", C.YELLOW + C.BOLD)
     print()
@@ -347,44 +338,66 @@ def run_loop(
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
         get_logger().warning("工作区存在未提交的改动，将与 AI 改动混合记录")
 
-    # ─── 逐轮模式（--no-plan）：保持原有行为 ───
+    # ─── 逐轮模式（--no-plan）：保持精简行为 ───
     if no_plan:
+        write_run_header(target_dir, 1)
         _run_legacy_loop(
             target_dir, agent, max_rounds, allowed_ext,
             no_backup, no_git, sleep_between, timeout,
-            agent_args, resume, keep_backups, ext_filter,
+            agent_args, keep_backups, ext_filter,
             dry_run=dry_run,
         )
         return
 
-    # ─── 两阶段模式：先规划，再逐条执行 ───
+    # ─── 任务列表模式：自动恢复 + 可选重新规划 ───
 
-    # 阶段 1：生成任务列表
     tasks = None
-    if resume:
+    metadata = {}
+    task_file = Path(target_dir) / TASK_FILE
+    has_existing_tasks = task_file.is_file()
+
+    if has_existing_tasks and replan:
+        # --replan：备份旧文件，强制重新生成
+        backup_task_file(target_dir)
+        has_existing_tasks = False
+        get_logger().info("重新规划模式: 已备份旧任务列表，将生成全新任务列表")
+
+    if has_existing_tasks:
+        # 自动恢复：加载已有任务列表和元信息
         tasks = load_task_list(target_dir)
+        metadata = load_task_metadata(target_dir)
+
         if tasks:
             pending = [t for t in tasks if t.get("status") != "done"]
-            get_logger().info(f"恢复模式: 从任务列表恢复（已完成 {len(tasks) - len(pending)}/{len(tasks)} 个任务）")
+            done_count = len(tasks) - len(pending)
+            get_logger().info(
+                f"自动恢复: 从 {TASK_FILE} 加载 "
+                f"（已完成 {done_count}/{len(tasks)} 个任务，"
+                f"已运行 {metadata.get('run_count', 1)} 次）"
+            )
             if not pending:
                 get_logger().info("任务列表中所有任务已完成，退出。")
                 return
         else:
             get_logger().warning("无法加载任务列表，将重新生成。")
+            tasks = None
 
     if tasks is None:
-        if dry_run and Path(target_dir, TASK_FILE).is_file():
+        # 全新生成任务列表
+        if dry_run and task_file.is_file():
             # 预览模式：如果已存在任务列表文件则直接加载，避免重新调用 Agent
             tasks = load_task_list(target_dir)
+            metadata = load_task_metadata(target_dir)
             get_logger().info("预览模式: 加载已有任务列表，跳过规划阶段 Agent 调用")
         if tasks is None:
             tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
         if tasks is None:
             get_logger().warning("任务列表生成失败，回退到逐轮模式")
+            write_run_header(target_dir, 1)
             _run_legacy_loop(
                 target_dir, agent, max_rounds, allowed_ext,
                 no_backup, no_git, sleep_between, timeout,
-                agent_args, False, keep_backups, ext_filter,
+                agent_args, keep_backups, ext_filter,
                 dry_run=dry_run,
             )
             return
@@ -393,43 +406,77 @@ def run_loop(
             get_logger().info("AI 评估后认为代码库已完善，无需改进")
             return
 
-        save_task_list(target_dir, tasks)
+        # 全新生成：初始化元信息
+        metadata = {"run_count": 1, "last_run": "", "global_round": 0}
+
+        save_task_list(target_dir, tasks,
+                       run_count=metadata["run_count"],
+                       last_run=metadata["last_run"],
+                       global_round=metadata["global_round"])
         logger = get_logger()
         logger.info(f"任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}")
-        # 打印全部任务概览（同时输出到控制台和日志文件）
+
+        # 打印全部任务概览
         logger.info(f"{'─' * 40}")
         logger.info(f"任务列表（共 {len(tasks)} 个）:")
         for t in tasks:
             logger.info(f"  #{t.get('id')} [{t.get('priority', '?')}] [{t.get('type', '')}] {t.get('title', '')}")
         logger.info(f"{'─' * 40}")
 
+    # ─── 更新运行元信息 ───
+    run_count = metadata.get("run_count", 1) + 1 if has_existing_tasks else metadata.get("run_count", 1)
+    last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    global_round = metadata.get("global_round", 0)
+    write_run_header(target_dir, run_count)
+
     # ─── 预览模式：打印任务执行计划后退出 ───
     if dry_run:
         _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args)
         return
 
-    # 阶段 2：逐条执行任务
-    round_num = parse_changelog_for_resume(target_dir)
-    round_num = round_num[0] if round_num else 0
+    # ─── 阶段 2：逐条执行任务 ───
+    round_num = global_round
     consecutive_noops = 0
+    tasks_done_this_run = 0
 
     while True:
-        # 获取下一个待执行任务
-        task = get_next_pending_task(target_dir)
+        # 获取下一个待执行任务（从内存缓存查找，避免重复解析文件）
+        task = get_next_pending_task(target_dir, tasks)
         if task is None:
             get_logger().info("所有任务已完成！")
+            break
+
+        # 单次运行任务数限制
+        if tasks_per_run > 0 and tasks_done_this_run >= tasks_per_run:
+            pending_left = sum(1 for t in tasks if t.get("status") != "done")
+            get_logger().info(
+                f"本次运行已处理 {tasks_per_run} 个任务（剩余 {pending_left} 个待执行），退出。"
+            )
             break
 
         round_num += 1
 
         if max_rounds > 0 and round_num > max_rounds:
-            pending_left = len([t for t in (load_task_list(target_dir) or []) if t.get("status") != "done"])
-            get_logger().info(f"达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。")
+            pending_left = sum(1 for t in tasks if t.get("status") != "done")
+            get_logger().info(
+                f"达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。"
+            )
             break
 
+        # 连续无改动：跳过当前任务，标记完成，继续下一个
         if consecutive_noops >= 3:
-            get_logger().info(f"连续 {consecutive_noops} 轮无改动，退出。")
-            break
+            tid = task.get("id", "?")
+            title = task.get("title", "")
+            get_logger().info(
+                f"连续 {consecutive_noops} 轮无改动，跳过任务 #{tid} — {title}"
+            )
+            mark_task_done(target_dir, task["id"], round_num, tasks,
+                           run_count=run_count, last_run=last_run,
+                           global_round=round_num)
+            consecutive_noops = 0
+            tasks_done_this_run += 1
+            time.sleep(sleep_between)
+            continue
 
         tid = task.get("id", "?")
         title = task.get("title", "")
@@ -449,20 +496,29 @@ def run_loop(
         )
 
         if not result["success"] and not result["has_diff"]:
+            # Agent 失败且无改动：重试同一任务
             consecutive_noops += 1
             time.sleep(sleep_between)
             continue
 
+        # Agent 成功或有改动：标记任务完成
+        mark_task_done(target_dir, task["id"], round_num, tasks,
+                       run_count=run_count, last_run=last_run,
+                       global_round=round_num)
         if result["has_diff"]:
-            mark_task_done(target_dir, task["id"], round_num)
             consecutive_noops = 0
         else:
-            # 无改动时也标记完成，避免死循环在同一个任务上
-            mark_task_done(target_dir, task["id"], round_num)
-            consecutive_noops += 1
+            # Agent 成功但无改动 —— 任务天然无需改动，重置计数器
+            consecutive_noops = 0
+        tasks_done_this_run += 1
 
         cprint(f"  ⏳ 等待 {sleep_between}s...", C.CYAN)
         time.sleep(sleep_between)
+
+    # ─── 退出前保存最终状态 ───
+    save_task_list(target_dir, tasks,
+                   run_count=run_count, last_run=last_run,
+                   global_round=round_num)
 
 
 def _run_legacy_loop(
@@ -475,31 +531,17 @@ def _run_legacy_loop(
     sleep_between: float,
     timeout: int,
     agent_args: Optional[list],
-    resume: bool,
     keep_backups: int,
     ext_filter: Optional[str],
     dry_run: bool = False,
 ):
-    """原有的逐轮模式：每轮让 AI 自己选一件事来做。"""
+    """原有的逐轮模式：每轮让 AI 自己选一件事来做。
+
+    不支持跨运行恢复，每次启动都从第 1 轮开始。
+    """
     consecutive_noops = 0
     round_num = 0
     prev_summary = ""
-
-    if resume:
-        resume_info = parse_changelog_for_resume(target_dir)
-        if resume_info is None:
-            get_logger().warning("无法解析 changelog 中的进度信息，从头开始。")
-            cprint("  ⚠ 无法解析 changelog 中的进度信息，从头开始。", C.YELLOW)
-        else:
-            last_round, last_summary = resume_info
-            if max_rounds > 0 and last_round >= max_rounds:
-                get_logger().info(f"上次已完成 {last_round}/{max_rounds} 轮，无需恢复。")
-                return
-            round_num = last_round
-            prev_summary = last_summary
-            get_logger().info(f"恢复模式: 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）")
-            cprint(f"  恢复模式 : 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）", C.BOLD + C.CYAN)
-            print()
 
     while True:
         round_num += 1
@@ -657,10 +699,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             示例:
-              python ai_controller.py ./my-project --agent pi --max-rounds 10    # 默认：先规划再执行
+              python ai_controller.py ./my-project --agent pi --max-rounds 10    # 先规划再执行，自动恢复
+              python ai_controller.py ./my-project --agent pi --replan           # 重新生成任务列表
               python ai_controller.py ./my-project --agent pi --plan-only        # 仅生成任务列表
               python ai_controller.py ./my-project --agent pi --no-plan          # 传统逐轮模式
-              python ai_controller.py ./my-project --agent pi --resume           # 恢复迭代
+              python ai_controller.py ./my-project --agent pi --tasks-per-run 3  # 每次最多处理 3 个任务
         """),
     )
     parser.add_argument("directory", help="目标代码目录")
@@ -675,19 +718,21 @@ def main():
     parser.add_argument("--sleep", type=float, default=2.0,
                         help="每轮间隔秒数 (默认 2.0)")
     parser.add_argument("--no-backup", action="store_true",
-                        help="不备份（危险！）")
+                        help="强制不备份（危险！若为 git 仓库则自动跳过备份）")
     parser.add_argument("--no-git", action="store_true",
                         help="不自动 git commit")
     parser.add_argument("--agent-args", default="",
                         help="传递给 Agent 的额外参数，用引号包裹，如 --agent-args '--model gpt-4'")
-    parser.add_argument("--resume", action="store_true",
-                        help="从中断处恢复：读取 changelog 找到上次进度，从下一轮继续迭代")
     parser.add_argument("--keep-backups", type=int, default=0,
                         help="只保留最近 N 个备份，旧备份自动清理（0=不限制，默认 0）")
     parser.add_argument("--no-plan", action="store_true",
                         help="跳过任务列表规划阶段，使用传统逐轮模式（每轮 AI 自行选择改进点）")
     parser.add_argument("--plan-only", action="store_true",
                         help="只生成任务列表 AI-TASKS.md，不执行")
+    parser.add_argument("--replan", action="store_true",
+                        help="强制重新生成任务列表（备份旧 AI-TASKS.md 为 .bak）")
+    parser.add_argument("--tasks-per-run", type=int, default=0,
+                        help="每次运行最多处理 N 个任务后退出，0=不限制 (默认 0)")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：跳过 Agent 调用和文件修改，只打印每轮要执行的任务描述和命令")
 
@@ -725,6 +770,9 @@ def main():
     if args.keep_backups < 0:
         get_logger().error(f"--keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}")
         sys.exit(1)
+    if args.tasks_per_run < 0:
+        get_logger().error(f"--tasks-per-run 不能为负数（0=不限制），当前值: {args.tasks_per_run}")
+        sys.exit(1)
 
     # 检查 agent 是否可用
     agent_cmd = AGENTS[args.agent]["cmd"]
@@ -752,10 +800,15 @@ def main():
     if args.plan_only:
         print()
         cprint("╔══════════════════════════════════════════╗", C.CYAN)
-        cprint("║      AI 自迭代控制器 v2.1 (仅规划)       ║", C.CYAN)
+        cprint("║      AI 自迭代控制器 v2.2 (仅规划)       ║", C.CYAN)
         cprint("╚══════════════════════════════════════════╝", C.CYAN)
         print()
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
+
+        # 如果 --replan --plan-only，备份旧文件再生成
+        if args.replan:
+            backup_task_file(str(target))
+
         tasks = generate_task_list(args.agent, str(target), ext_filter, args.timeout, agent_args)
         if tasks is None:
             get_logger().error("规划失败，未能生成任务列表。")
@@ -763,7 +816,8 @@ def main():
         if len(tasks) == 0:
             get_logger().info("AI 评估后认为代码库已完善，无需改进。")
         else:
-            save_task_list(str(target), tasks)
+            save_task_list(str(target), tasks, run_count=1,
+                           last_run="", global_round=0)
             get_logger().info(f"任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）")
         sys.exit(0)
 
@@ -778,9 +832,10 @@ def main():
             sleep_between=args.sleep,
             timeout=args.timeout,
             agent_args=agent_args,
-            resume=args.resume,
             keep_backups=args.keep_backups,
             no_plan=args.no_plan,
+            replan=args.replan,
+            tasks_per_run=args.tasks_per_run,
             dry_run=args.dry_run,
         )
     except KeyboardInterrupt:

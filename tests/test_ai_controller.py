@@ -3,9 +3,8 @@
 覆盖以下纯逻辑函数：
 - _try_parse_json：JSON 解析与容错
 - _extract_json_tasks：从 agent 输出中提取 JSON 任务列表
-- parse_changelog_for_resume：解析 changelog 获取恢复进度
 - check_ext_filter：文件后缀过滤
-- load_task_list / save_task_list / mark_task_done / get_next_pending_task：任务列表管理
+- load_task_list / save_task_list / load_task_metadata / mark_task_done / get_next_pending_task：任务列表管理
 - parse_summary / extract_model_hint / build_ext_filter_arg / build_task_prompt：工具函数
 - call_agent：subprocess 调用的 mock 测试
 """
@@ -189,104 +188,6 @@ class TestExtractJsonTasks:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# parse_changelog_for_resume
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestParseChangelogForResume:
-    """测试从 AI-CHANGELOG.md 解析恢复信息。"""
-
-    def test_single_round_changelog(self, tmp_workspace):
-        """单轮 changelog，正确解析轮次号和改动说明。"""
-        content = textwrap.dedent("""\
-            # AI 自迭代改动记录
-            - 开始时间: 2026-01-01 10:00:00
-            - Agent: pi
-            ---
-            ## Round 1 — 2026-01-01 10:05:00
-
-            改动说明: 修复了空指针异常，增加了参数校验
-        """)
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text(content, encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result == (1, "修复了空指针异常，增加了参数校验")
-
-    def test_multiple_rounds_returns_last(self, tmp_workspace):
-        """多轮 changelog，返回最后一轮的轮次号和说明。"""
-        content = textwrap.dedent("""\
-            # AI 自迭代改动记录
-            ---
-            ## Round 1 — 2026-01-01 10:00:00
-
-            改动说明: 第一轮改动
-
-            ## Round 2 — 2026-01-01 10:10:00
-
-            改动说明: 第二轮改动
-
-            ## Round 3 — 2026-01-01 10:20:00
-
-            改动说明: 第三轮改动
-        """)
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text(content, encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result == (3, "第三轮改动")
-
-    def test_no_changelog_file(self, tmp_workspace):
-        """目录中没有 AI-CHANGELOG.md 文件。"""
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result is None
-
-    def test_empty_changelog(self, tmp_workspace):
-        """changelog 文件存在但无轮次记录。"""
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text("# 空 changelog\n\n无轮次记录\n", encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result is None
-
-    def test_changelog_with_bold_summary(self, tmp_workspace):
-        """改动说明用粗体标记（**改动说明**:）。"""
-        content = textwrap.dedent("""\
-            ## Round 5 — 2026-01-05 12:00:00
-
-            **改动说明**: 优化了重要逻辑
-        """)
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text(content, encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result == (5, "优化了重要逻辑")
-
-    def test_changelog_with_chinese_colon(self, tmp_workspace):
-        """改动说明使用中文冒号。"""
-        content = textwrap.dedent("""\
-            ## Round 2 — 2026-01-02 10:00:00
-
-            改动说明：用中文冒号写的说明
-        """)
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text(content, encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result == (2, "用中文冒号写的说明")
-
-    def test_multiline_summary(self, tmp_workspace):
-        """改动说明跨多行。"""
-        content = textwrap.dedent("""\
-            ## Round 1 — 2026-01-01 10:00:00
-
-            改动说明: 第一行改动描述
-            第二行补充说明
-            第三行更多细节
-        """)
-        log_path = Path(tmp_workspace) / "AI-CHANGELOG.md"
-        log_path.write_text(content, encoding="utf-8")
-        result = ac.parse_changelog_for_resume(tmp_workspace)
-        assert result is not None
-        # 多行说明被捕获（regex 使用 DOTALL）
-        assert "第一行改动描述" in result[1]
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # check_ext_filter
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -348,7 +249,7 @@ class TestCheckExtFilter:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# save_task_list / load_task_list / mark_task_done / get_next_pending_task
+# save_task_list / load_task_list / load_task_metadata / mark_task_done
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestTaskListIO:
@@ -367,6 +268,44 @@ class TestTaskListIO:
         assert statuses[1] == "pending"
         assert statuses[2] == "pending"
         assert statuses[3] == "done"
+
+    def test_save_and_load_with_metadata(self, tmp_workspace, sample_tasks):
+        """带元信息保存再加载，元信息正确持久化。"""
+        ac.save_task_list(tmp_workspace, sample_tasks,
+                          run_count=3, last_run="2026-06-15 17:30:00",
+                          global_round=12)
+        loaded = ac.load_task_list(tmp_workspace)
+        assert loaded is not None
+        assert len(loaded) == 3
+
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta["run_count"] == 3
+        assert meta["last_run"] == "2026-06-15 17:30:00"
+        assert meta["global_round"] == 12
+
+    def test_load_metadata_no_file(self, tmp_workspace):
+        """无任务文件时 load_task_metadata 返回空字典。"""
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta == {}
+
+    def test_load_metadata_old_format_no_header(self, tmp_workspace):
+        """旧格式（无元信息头部）返回默认值。"""
+        content = textwrap.dedent("""\
+            # AI 任务列表
+            生成时间: 2026-01-01 10:00:00
+
+            共 1 个任务
+
+            ## 待执行
+            - [ ] **#1** [high] [修复类] 修复 bug
+              详细描述
+        """)
+        (Path(tmp_workspace) / "AI-TASKS.md").write_text(content, encoding="utf-8")
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta["run_count"] == 1  # 默认值
+        assert meta["last_run"] == ""
+        assert meta["global_round"] == 0
+        assert meta["gen_time"] == "2026-01-01 10:00:00"
 
     def test_load_nonexistent_file(self, tmp_workspace):
         """加载不存在的任务文件返回 None。"""
@@ -389,6 +328,19 @@ class TestTaskListIO:
         task2 = next(t for t in loaded if t["id"] == 2)
         assert task2["status"] == "done"
         assert task2["completed_round"] == 7
+        # 新格式应包含 completed_time
+        assert task2.get("completed_time", "") != ""
+
+    def test_mark_task_done_with_metadata(self, tmp_workspace, sample_tasks):
+        """带元信息标记完成，元信息持久化。"""
+        ac.save_task_list(tmp_workspace, sample_tasks)
+        ac.mark_task_done(tmp_workspace, 2, 7,
+                          run_count=2, last_run="2026-06-15 18:00:00",
+                          global_round=7)
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta["run_count"] == 2
+        assert meta["last_run"] == "2026-06-15 18:00:00"
+        assert meta["global_round"] == 7
 
     def test_mark_nonexistent_task(self, tmp_workspace, sample_tasks):
         """标记不存在的任务 ID 不影响现有数据。"""
@@ -424,6 +376,81 @@ class TestTaskListIO:
         """无任务文件时返回 None。"""
         task = ac.get_next_pending_task(tmp_workspace)
         assert task is None
+
+    def test_done_task_with_timestamp_format(self, tmp_workspace):
+        """已完成任务带时间戳格式 (Round N, YYYY-MM-DD HH:MM) 正确解析。"""
+        content = textwrap.dedent("""\
+            # AI 任务列表
+            生成时间: 2026-06-15 16:16:30
+            运行次数: 2
+            最后运行: 2026-06-15 17:30:00
+            全局轮次: 5
+
+            共 2 个任务
+
+            ## 已完成
+            - [x] **#1** 修复空指针 (Round 3, 2026-06-15 16:30)
+        """)
+        (Path(tmp_workspace) / "AI-TASKS.md").write_text(content, encoding="utf-8")
+        loaded = ac.load_task_list(tmp_workspace)
+        assert loaded is not None
+        assert len(loaded) == 1
+        assert loaded[0]["id"] == 1
+        assert loaded[0]["status"] == "done"
+        assert loaded[0]["completed_round"] == 3
+        assert loaded[0]["completed_time"] == "2026-06-15 16:30"
+        assert loaded[0]["title"] == "修复空指针"
+
+    def test_done_task_old_format_without_timestamp(self, tmp_workspace):
+        """旧格式已完成任务（无时间戳）仍然正确解析。"""
+        content = textwrap.dedent("""\
+            # AI 任务列表
+            生成时间: 2026-01-01 10:00:00
+
+            共 1 个任务
+
+            ## 已完成
+            - [x] **#5** 旧格式任务 (Round 2)
+        """)
+        (Path(tmp_workspace) / "AI-TASKS.md").write_text(content, encoding="utf-8")
+        loaded = ac.load_task_list(tmp_workspace)
+        assert loaded is not None
+        assert len(loaded) == 1
+        assert loaded[0]["id"] == 5
+        assert loaded[0]["status"] == "done"
+        assert loaded[0]["completed_round"] == 2
+        assert loaded[0]["completed_time"] == ""
+
+    def test_backup_task_file(self, tmp_workspace, sample_tasks):
+        """backup_task_file 创建 .bak 备份。"""
+        ac.save_task_list(tmp_workspace, sample_tasks)
+        ac.backup_task_file(tmp_workspace)
+
+        bak_path = Path(tmp_workspace) / ac.TASK_FILE_BAK
+        assert bak_path.is_file()
+        # 原文件仍然存在
+        assert (Path(tmp_workspace) / ac.TASK_FILE).is_file()
+        # bak 内容应与原文件一致
+        original = (Path(tmp_workspace) / ac.TASK_FILE).read_text(encoding="utf-8")
+        backup = bak_path.read_text(encoding="utf-8")
+        assert original == backup
+
+    def test_backup_task_file_no_source(self, tmp_workspace):
+        """无原文件时 backup_task_file 不报错也不创建 bak。"""
+        ac.backup_task_file(tmp_workspace)
+        assert not (Path(tmp_workspace) / ac.TASK_FILE_BAK).is_file()
+
+    def test_save_done_task_includes_timestamp(self, tmp_workspace, sample_tasks):
+        """保存已完成任务时包含 completed_time 字段。"""
+        # 模拟 mark_task_done 的效果
+        for t in sample_tasks:
+            if t["id"] == 3:
+                t["completed_time"] = "2026-06-15 16:30"
+        ac.save_task_list(tmp_workspace, sample_tasks)
+
+        content = (Path(tmp_workspace) / "AI-TASKS.md").read_text(encoding="utf-8")
+        # 已完成任务应有时间戳
+        assert "(Round 5, 2026-06-15 16:30)" in content
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -773,7 +800,7 @@ class TestGetChangedFiles:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# init_log / write_round_log
+# init_log / write_round_log / write_run_header
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestLoggingFunctions:
@@ -820,6 +847,13 @@ class TestLoggingFunctions:
         assert "无改动" in content
         assert "无（本轮无代码变更）" in content
 
+    def test_write_run_header(self, tmp_workspace):
+        """write_run_header 在 changelog 中写入运行头部。"""
+        ac.init_log(tmp_workspace, "pi")
+        ac.write_run_header(tmp_workspace, 3)
+        content = (Path(tmp_workspace) / "AI-CHANGELOG.md").read_text(encoding="utf-8")
+        assert "运行 #3" in content
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # load_config —— 配置文件读取
@@ -844,10 +878,11 @@ sleep = 1.5
 no_backup = true
 no_git = false
 agent_args = "--model gpt-4"
-resume = true
 keep_backups = 10
 no_plan = true
 plan_only = false
+replan = false
+tasks_per_run = 3
 dry_run = false
 """
         cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
@@ -862,10 +897,11 @@ dry_run = false
         assert config["no_backup"] is True
         assert config["no_git"] is False
         assert config["agent_args"] == "--model gpt-4"
-        assert config["resume"] is True
         assert config["keep_backups"] == 10
         assert config["no_plan"] is True
         assert config["plan_only"] is False
+        assert config["replan"] is False
+        assert config["tasks_per_run"] == 3
         assert config["dry_run"] is False
 
     def test_toml_config_partial(self, tmp_workspace):
@@ -897,10 +933,11 @@ sleep: 3.0
 no_backup: true
 no_git: true
 agent_args: "-m claude-sonnet-4"
-resume: false
 keep_backups: 5
 no_plan: false
 plan_only: false
+replan: true
+tasks_per_run: 5
 dry_run: true
 """
         # 需要 PyYAML
@@ -917,9 +954,10 @@ dry_run: true
         assert config["no_backup"] is True
         assert config["no_git"] is True
         assert config["agent_args"] == "-m claude-sonnet-4"
-        assert config["resume"] is False
         assert config["keep_backups"] == 5
         assert config["plan_only"] is False
+        assert config["replan"] is True
+        assert config["tasks_per_run"] == 5
         assert config["dry_run"] is True
 
     def test_yaml_config_with_yml_extension(self, tmp_workspace):
@@ -982,19 +1020,19 @@ timeout: 999
         assert config == {}
 
     def test_unknown_keys_filtered(self, tmp_workspace):
-        """配置文件中的未知键被忽略。"""
+        """配置文件中的未知键被忽略（包括已移除的 resume）。"""
         toml_content = """\
 agent = "pi"
+resume = true
 unknown_param = "should be ignored"
-another_unknown = 123
 """
         cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
         cfg_path.write_text(toml_content, encoding="utf-8")
         config = ac.load_config(tmp_workspace)
 
         assert config["agent"] == "pi"
+        assert "resume" not in config  # 已移除
         assert "unknown_param" not in config
-        assert "another_unknown" not in config
         assert len(config) == 1  # 仅 agent 通过
 
     def test_type_conversion_int_values(self, tmp_workspace):
@@ -1004,6 +1042,7 @@ max_rounds = 42
 timeout = 1800
 sleep = 2.5
 keep_backups = 3
+tasks_per_run = 10
 """
         cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
         cfg_path.write_text(toml_content, encoding="utf-8")
@@ -1017,3 +1056,5 @@ keep_backups = 3
         assert config["sleep"] == 2.5
         assert isinstance(config["keep_backups"], int)
         assert config["keep_backups"] == 3
+        assert isinstance(config["tasks_per_run"], int)
+        assert config["tasks_per_run"] == 10
