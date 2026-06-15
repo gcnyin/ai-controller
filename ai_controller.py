@@ -527,8 +527,8 @@ def run_loop(
 
         if has_diff:
             if git_repo:
-                git_commit(target_dir, round_num)
                 diff_stat = get_git_diff_summary(target_dir)
+                git_commit(target_dir, round_num)
                 if diff_stat:
                     cprint(f"  ✓ 本轮改动: {diff_stat}", C.GREEN)
                 else:
