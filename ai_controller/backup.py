@@ -4,6 +4,8 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
+from . import SKIP_DIRS
+
 BACKUP_DIR_NAME = ".ai-controller-backups"
 
 
@@ -16,10 +18,7 @@ def backup_all(target_dir: str, round_num: int) -> Path | None:
     try:
         shutil.copytree(
             target_dir, backup_folder,
-            ignore=shutil.ignore_patterns(
-                BACKUP_DIR_NAME, ".git", "node_modules", "__pycache__",
-                ".venv", "venv", "dist", "build", ".next",
-            ),
+            ignore=shutil.ignore_patterns(*SKIP_DIRS),
             dirs_exist_ok=True,
         )
         return backup_folder

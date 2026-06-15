@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import SKIP_DIRS
 from .logger import get_logger, LOG_FILE
 from .backup import BACKUP_DIR_NAME
 
@@ -97,8 +98,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
     if since_ts > 0:
         changed = []
         # 需要跳过的目录（不遍历）
-        skip_dirs = {BACKUP_DIR_NAME, ".git", "__pycache__", ".venv", "venv",
-                     "node_modules", "dist", "build", ".next"}
+        skip_dirs = set(SKIP_DIRS)
         for root, dirs, files in os.walk(target_dir, topdown=True):
             # 过滤要跳过的目录
             dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".ai-controller-")]

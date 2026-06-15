@@ -34,6 +34,39 @@ AGENTS = {
 }
 
 
+def build_agent_command(agent: str, prompt: str, target_dir: str,
+                       extra_args: list | None = None,
+                       ext_filter: str | None = None) -> tuple[list[str], str | None]:
+    """构建 Agent 命令行，返回 (命令列表, cwd)。
+
+    call_agent 和 _build_dry_run_command 共用此函数，
+    避免命令拼接逻辑在两处重复。
+
+    Returns:
+        (cmd_parts, cwd) — cwd 为 None 时表示 Agent 自带工作目录选项，
+        不需要额外设置 subprocess cwd。
+    """
+    cfg = AGENTS[agent]
+
+    full_prompt = prompt
+    if ext_filter:
+        full_prompt = ext_filter + "\n\n" + prompt
+
+    cmd_parts = [cfg["cmd"]]
+    if extra_args:
+        cmd_parts.extend(extra_args)
+    cmd_parts.extend(cfg["args"])
+
+    if cfg["cwd_option"]:
+        cmd_parts.extend([cfg["cwd_option"], target_dir])
+        cwd = None
+    else:
+        cwd = target_dir
+
+    cmd_parts.append(full_prompt)
+    return cmd_parts, cwd
+
+
 def parse_summary(output: str) -> str:
     """从 agent 输出中提取 SUMMARY 行"""
     # 匹配 SUMMARY: xxx 或 SUMMARY：xxx（中英文冒号都支持）
@@ -55,25 +88,9 @@ def call_agent(agent: str, prompt: str, target_dir: str,
 
     quiet=True 时不打印 agent 的原始输出（不打印 prompt 和冗余输出）。
     """
-    cfg = AGENTS[agent]
-
-    # 合并 prompt
-    full_prompt = prompt
-    if ext_filter:
-        full_prompt = ext_filter + "\n\n" + prompt
-
-    cmd_parts = [cfg["cmd"]]
-    if extra_args:
-        cmd_parts.extend(extra_args)
-    cmd_parts.extend(cfg["args"])
-
-    if cfg["cwd_option"]:
-        cmd_parts.extend([cfg["cwd_option"], target_dir])
-        cwd = None
-    else:
-        cwd = target_dir
-
-    cmd_parts.append(full_prompt)
+    cmd_parts, cwd = build_agent_command(
+        agent, prompt, target_dir, extra_args, ext_filter,
+    )
 
     if not quiet:
         cprint(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...", C.CYAN)

@@ -15,7 +15,7 @@ from typing import Optional, Tuple, List
 from . import C, cprint
 from .config import load_config
 from .logger import get_logger, setup_logger, LOG_FILE
-from .agent import AGENTS, call_agent
+from .agent import AGENTS, call_agent, build_agent_command
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
 from .tasks import (
     TASK_FILE,
@@ -170,13 +170,6 @@ def write_round_log(
     log_path = Path(target_dir) / LOG_FILE
     with open(log_path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-
-    # 同时输出到 logger（控制台 + 日志文件）
-    logger = get_logger()
-    file_list = ", ".join(changed_files[:8]) if changed_files else "无"
-    if len(changed_files) > 8:
-        file_list += f" ...共{len(changed_files)}个"
-    logger.info(f"Round #{round_num} | 耗时 {elapsed:.1f}s | {summary} | 文件: {file_list}")
 
 
 # ─── 单轮执行 ─────────────────────────────────────────────────────────
@@ -608,21 +601,16 @@ def _run_legacy_loop(
 
 def _build_dry_run_command(agent: str, prompt: str, agent_args: Optional[list],
                            ext_filter: Optional[str], target_dir: str) -> str:
-    """构建预览模式下展示的等价命令行，供用户参考。"""
-    cfg = AGENTS[agent]
-    cmd_parts = [cfg["cmd"]]
-    if agent_args:
-        cmd_parts.extend(agent_args)
-    cmd_parts.extend(cfg["args"])
+    """构建预览模式下展示的等价命令行，供用户参考。
 
-    if cfg["cwd_option"]:
-        cmd_parts.extend([cfg["cwd_option"], target_dir])
-
-    full_prompt = prompt
-    if ext_filter:
-        full_prompt = ext_filter + "\n\n" + prompt
-    cmd_parts.append(shlex.quote(full_prompt))
-
+    复用 build_agent_command 构造命令列表，仅将最后一个参数（prompt）
+    用 shlex.quote 包裹后拼接为可复制的字符串。
+    """
+    cmd_parts, _ = build_agent_command(
+        agent, prompt, target_dir, agent_args, ext_filter,
+    )
+    # prompt 作为最后一个参数，quote 以安全展示
+    cmd_parts[-1] = shlex.quote(cmd_parts[-1])
     return " ".join(cmd_parts)
 
 

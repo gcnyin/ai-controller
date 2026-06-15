@@ -34,11 +34,18 @@ def cprint(msg: str, color: str = ""):
     print(f"{color}{msg}{C.R}")
 
 
+# ── 全局常量 ──
+
+# 备份/遍历时需要跳过的目录，backup.py 和 git_ops.py 共用
+SKIP_DIRS = (".ai-controller-backups", ".git", "__pycache__", ".venv", "venv",
+             "node_modules", "dist", "build", ".next")
+
+
 # ── 子模块重导出 ──
 
 from .logger import get_logger, setup_logger, ColoredFormatter, LOG_FILE, LOGGER_FILE
 from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
-from .agent import AGENTS, call_agent, parse_summary
+from .agent import AGENTS, call_agent, parse_summary, build_agent_command
 from .tasks import (
     TASK_FILE,
     TASK_FILE_BAK,

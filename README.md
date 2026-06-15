@@ -37,8 +37,11 @@ python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
 # 只生成任务列表，不执行（保存到 AI-TASKS.md）
 python ai_controller.py ./my-project --agent pi --plan-only
 
-# 恢复执行（从 AI-TASKS.md 读取未完成任务继续）
-python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
+# 自动恢复（检测到 AI-TASKS.md 存在时自动从未完成任务继续）
+python ai_controller.py ./my-project --agent pi --max-rounds 10
+
+# 重新生成任务列表
+python ai_controller.py ./my-project --agent pi --replan
 ```
 
 ### 传统模式（跳过规划，每轮 AI 自行选择）
@@ -60,14 +63,31 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 | `--no-backup` | 不备份 | false |
 | `--no-git` | 不自动 git commit | false |
 | `--agent-args` | 传递给 Agent 的额外参数 | - |
-| `--resume` | 中断后恢复 | false |
+| `--replan` | 强制重新生成任务列表 | false |
 | `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
 | `--no-plan` | 跳过规划阶段，使用传统逐轮模式 | false |
 | `--plan-only` | 只生成任务列表，不执行 | false |
+| `--replan` | 强制重新生成任务列表（备份旧文件为 .bak） | false |
+| `--tasks-per-run` | 每次运行最多处理 N 个任务后退出（0=不限制） | 0 |
+| `--dry-run` | 预览模式：打印执行计划，不实际修改文件 | false |
+| `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
+
+## 配置文件
+
+可在项目根目录下放置 `.ai-controller.toml` 或 `.ai-controller.yaml` 预设参数，
+命令行参数优先级高于配置文件。
+
+```toml
+# .ai-controller.toml
+agent = "pi"
+max_rounds = 20
+ext = ".py,.ts"
+timeout = 300
+```
 
 ## 工作流程
 
-### 默认模式（v2.1 新增）
+### 默认模式（v2.2）
 
 ```
 ┌──────────────────────────────┐
@@ -128,20 +148,22 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 - [x] **#3** 修复 login bug (Round 1)
 ```
 
-- `--resume` 会自动读取该文件，从未完成的任务继续
-- 可以在执行过程中手动编辑该文件调整任务优先级或删除不需要的任务
+- 检测到 `AI-TASKS.md` 存在时会自动从中加载未完成任务继续执行
+- 可在执行前手动编辑该文件调整优先级或删除不需要的任务
 
 ## 中断恢复
 
-Ctrl+C 中断后，可以带 `--resume` 重新运行：
+Ctrl+C 中断后，直接重新运行相同命令即可自动恢复：
 
 ```bash
-# 默认模式：从 AI-TASKS.md 读取未完成任务，继续执行
-python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
+# 默认模式：自动检测 AI-TASKS.md，从未完成任务继续执行
+python ai_controller.py ./my-project --agent pi --max-rounds 10
 
-# 传统模式：从 AI-CHANGELOG.md 找到断点，从下一轮继续
-python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume --no-plan
+# 传统模式（--no-plan）：每次从第 1 轮重新开始
+python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 ```
+
+如需重新规划任务列表，使用 `--replan` 参数。
 
 ## 退出条件
 
