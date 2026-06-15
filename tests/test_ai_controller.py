@@ -819,3 +819,201 @@ class TestLoggingFunctions:
         assert "Round 2" in content
         assert "无改动" in content
         assert "无（本轮无代码变更）" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# load_config —— 配置文件读取
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestLoadConfig:
+    """测试从目标目录加载 .ai-controller.toml/.yaml 配置文件。"""
+
+    def test_no_config_file(self, tmp_workspace):
+        """目标目录无配置文件，返回空字典。"""
+        config = ac.load_config(tmp_workspace)
+        assert config == {}
+
+    def test_toml_config_full(self, tmp_workspace):
+        """TOML 配置文件，包含所有参数。"""
+        toml_content = """\
+agent = "claude"
+max_rounds = 5
+ext = ".py,.ts"
+timeout = 300
+sleep = 1.5
+no_backup = true
+no_git = false
+agent_args = "--model gpt-4"
+resume = true
+keep_backups = 10
+no_plan = true
+plan_only = false
+dry_run = false
+"""
+        cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
+        cfg_path.write_text(toml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert config["agent"] == "claude"
+        assert config["max_rounds"] == 5
+        assert config["ext"] == ".py,.ts"
+        assert config["timeout"] == 300
+        assert config["sleep"] == 1.5
+        assert config["no_backup"] is True
+        assert config["no_git"] is False
+        assert config["agent_args"] == "--model gpt-4"
+        assert config["resume"] is True
+        assert config["keep_backups"] == 10
+        assert config["no_plan"] is True
+        assert config["plan_only"] is False
+        assert config["dry_run"] is False
+
+    def test_toml_config_partial(self, tmp_workspace):
+        """TOML 配置文件，只包含部分参数。"""
+        toml_content = """\
+agent = "pi"
+max_rounds = 20
+timeout = 900
+"""
+        cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
+        cfg_path.write_text(toml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert config["agent"] == "pi"
+        assert config["max_rounds"] == 20
+        assert config["timeout"] == 900
+        # 未配置的参数不应出现
+        assert "sleep" not in config
+        assert "ext" not in config
+
+    def test_yaml_config(self, tmp_workspace):
+        """YAML 配置文件，参数读取正确。"""
+        yaml_content = """\
+agent: claude
+max_rounds: 3
+ext: ".py"
+timeout: 120
+sleep: 3.0
+no_backup: true
+no_git: true
+agent_args: "-m claude-sonnet-4"
+resume: false
+keep_backups: 5
+no_plan: false
+plan_only: false
+dry_run: true
+"""
+        # 需要 PyYAML
+        pytest.importorskip("yaml")
+        cfg_path = Path(tmp_workspace) / ".ai-controller.yaml"
+        cfg_path.write_text(yaml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert config["agent"] == "claude"
+        assert config["max_rounds"] == 3
+        assert config["ext"] == ".py"
+        assert config["timeout"] == 120
+        assert config["sleep"] == 3.0
+        assert config["no_backup"] is True
+        assert config["no_git"] is True
+        assert config["agent_args"] == "-m claude-sonnet-4"
+        assert config["resume"] is False
+        assert config["keep_backups"] == 5
+        assert config["plan_only"] is False
+        assert config["dry_run"] is True
+
+    def test_yaml_config_with_yml_extension(self, tmp_workspace):
+        """.ai-controller.yml 也能被识别并加载。"""
+        yaml_content = """\
+agent: pi
+max_rounds: 1
+"""
+        pytest.importorskip("yaml")
+        cfg_path = Path(tmp_workspace) / ".ai-controller.yml"
+        cfg_path.write_text(yaml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert config["agent"] == "pi"
+        assert config["max_rounds"] == 1
+
+    def test_toml_priority_over_yaml(self, tmp_workspace):
+        """同时存在 .toml 和 .yaml 时，优先读取 .toml。"""
+        toml_content = """\
+agent = "pi"
+max_rounds = 7
+"""
+        yaml_content = """\
+agent: claude
+max_rounds: 3
+timeout: 999
+"""
+        pytest.importorskip("yaml")
+        (Path(tmp_workspace) / ".ai-controller.toml").write_text(toml_content, encoding="utf-8")
+        (Path(tmp_workspace) / ".ai-controller.yaml").write_text(yaml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        # TOML 优先
+        assert config["agent"] == "pi"
+        assert config["max_rounds"] == 7
+        # timeout 来自 yaml 不会被读取（因为 toml 优先）
+        assert "timeout" not in config
+
+    def test_invalid_toml_returns_empty(self, tmp_workspace):
+        """无效的 TOML 文件返回空字典。"""
+        toml_content = "这不是有效的 TOML 格式 {{{{"
+        (Path(tmp_workspace) / ".ai-controller.toml").write_text(toml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+        assert config == {}
+
+    def test_invalid_yaml_returns_empty(self, tmp_workspace):
+        """无效的 YAML 文件返回空字典。"""
+        pytest.importorskip("yaml")
+        yaml_content = ": : : messed up yaml"
+        (Path(tmp_workspace) / ".ai-controller.yaml").write_text(yaml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+        assert config == {}
+
+    def test_bare_yaml_not_dict_returns_empty(self, tmp_workspace):
+        """YAML 内容是标量或列表等非字典类型，返回空字典。"""
+        pytest.importorskip("yaml")
+        yaml_content = "- item1\n- item2\n"
+        (Path(tmp_workspace) / ".ai-controller.yaml").write_text(yaml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+        assert config == {}
+
+    def test_unknown_keys_filtered(self, tmp_workspace):
+        """配置文件中的未知键被忽略。"""
+        toml_content = """\
+agent = "pi"
+unknown_param = "should be ignored"
+another_unknown = 123
+"""
+        cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
+        cfg_path.write_text(toml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert config["agent"] == "pi"
+        assert "unknown_param" not in config
+        assert "another_unknown" not in config
+        assert len(config) == 1  # 仅 agent 通过
+
+    def test_type_conversion_int_values(self, tmp_workspace):
+        """数值类型参数被正确转为 int/float。"""
+        toml_content = """\
+max_rounds = 42
+timeout = 1800
+sleep = 2.5
+keep_backups = 3
+"""
+        cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
+        cfg_path.write_text(toml_content, encoding="utf-8")
+        config = ac.load_config(tmp_workspace)
+
+        assert isinstance(config["max_rounds"], int)
+        assert config["max_rounds"] == 42
+        assert isinstance(config["timeout"], int)
+        assert config["timeout"] == 1800
+        assert isinstance(config["sleep"], float)
+        assert config["sleep"] == 2.5
+        assert isinstance(config["keep_backups"], int)
+        assert config["keep_backups"] == 3

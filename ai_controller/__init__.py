@@ -1,6 +1,7 @@
 """AI 自迭代控制器 —— 模块化包结构。
 
 模块划分：
+    config  - 配置文件读取（load_config）
     logger  - 日志系统（ColoredFormatter, setup_logger, get_logger）
     prompts - 提示词模板（PLAN_PROMPT, TASK_PROMPT, build_task_prompt）
     agent   - Agent 调用（AGENTS 配置, call_agent, parse_summary）
@@ -56,6 +57,7 @@ from .git_ops import (
     get_changed_files,
     get_git_diff_summary,
 )
+from .config import load_config, CONFIG_FILE_NAMES
 from .cli import (
     main,
     run_loop,

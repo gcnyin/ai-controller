@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Optional, Tuple, List
 
 from . import C, cprint
+from .config import load_config
 from .logger import get_logger, setup_logger, LOG_FILE
 from .agent import AGENTS, call_agent
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
@@ -690,6 +691,20 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：跳过 Agent 调用和文件修改，只打印每轮要执行的任务描述和命令")
 
+    # ── 第一阶段：仅解析 directory 参数，用于定位配置文件 ──
+    # 用 partial parse 只拿到 directory，忽略其他参数的缺失
+    prelim_args, _ = parser.parse_known_args()
+
+    # ── 加载配置文件（如果存在）──
+    prelim_target = Path(prelim_args.directory).resolve()
+    config = load_config(str(prelim_target))
+    if config:
+        logger = get_logger()
+        log_target = str(prelim_target)
+        logger.info(f"已加载配置文件: {', '.join(f'{k}={v}' for k, v in sorted(config.items()))}")
+        parser.set_defaults(**config)
+
+    # ── 正式解析（命令行参数覆盖配置文件值）──
     args = parser.parse_args()
 
     target = Path(args.directory).resolve()
