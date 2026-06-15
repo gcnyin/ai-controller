@@ -186,6 +186,41 @@ def backup_all(target_dir: str, round_num: int) -> Optional[Path]:
         return None
 
 
+def cleanup_old_backups(target_dir: str, keep_count: int):
+    """删除旧备份，只保留最近 keep_count 个备份目录。
+
+    备份目录按名称排序（名称含时间戳，自然顺序即为时间顺序），
+    删除最旧的超出数量的目录。
+
+    Args:
+        target_dir: 目标目录路径
+        keep_count: 保留的备份数量，<=0 表示不限制
+    """
+    if keep_count <= 0:
+        return
+
+    backup_root = Path(target_dir) / BACKUP_DIR_NAME
+    if not backup_root.is_dir():
+        return
+
+    # 收集所有备份子目录，按名称排序（含时间戳，自然顺序即时间顺序）
+    backups = sorted(
+        [d for d in backup_root.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+    )
+
+    if len(backups) <= keep_count:
+        return
+
+    # 删除最旧的超出部分
+    to_delete = backups[:len(backups) - keep_count]
+    for d in to_delete:
+        try:
+            shutil.rmtree(d)
+        except Exception as e:
+            print(f"  ⚠ 清理旧备份 {d.name} 失败: {e}")
+
+
 # ─── 日志记录 ──────────────────────────────────────────────────────────
 
 def parse_summary(output: str) -> str:
@@ -549,6 +584,7 @@ def run_loop(
     timeout: int = 600,
     agent_args: Optional[list] = None,
     resume: bool = False,
+    keep_backups: int = 0,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
@@ -563,6 +599,8 @@ def run_loop(
         cprint(f"  文件过滤 : {', '.join(sorted(allowed_ext))}", C.BOLD)
     if not no_backup:
         cprint(f"  备份目录 : {BACKUP_DIR_NAME}/", C.BOLD)
+        if keep_backups > 0:
+            cprint(f"  备份保留 : 最近 {keep_backups} 个", C.BOLD)
     if is_git_repo(target_dir) and not no_git:
         cprint(f"  Git      : 自动 commit", C.BOLD)
     print()
@@ -616,6 +654,9 @@ def run_loop(
             backup_folder = backup_all(target_dir, round_num)
             if backup_folder:
                 cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
+            # 清理旧备份，只保留最近 keep_backups 个
+            if keep_backups > 0:
+                cleanup_old_backups(target_dir, keep_backups)
 
         # 记录改动前的 git 状态
         git_repo = is_git_repo(target_dir) and not no_git
@@ -731,6 +772,8 @@ def main():
                         help="传递给 Agent 的额外参数，用引号包裹，如 --agent-args '--model gpt-4'")
     parser.add_argument("--resume", action="store_true",
                         help="从中断处恢复：读取 changelog 找到上次进度，从下一轮继续迭代")
+    parser.add_argument("--keep-backups", type=int, default=0,
+                        help="只保留最近 N 个备份，旧备份自动清理（0=不限制，默认 0）")
 
     args = parser.parse_args()
 
@@ -748,6 +791,9 @@ def main():
         sys.exit(1)
     if args.sleep < 0:
         cprint(f"错误: --sleep 不能为负数，当前值: {args.sleep}", C.RED)
+        sys.exit(1)
+    if args.keep_backups < 0:
+        cprint(f"错误: --keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}", C.RED)
         sys.exit(1)
 
     # 检查 agent 是否可用
@@ -784,6 +830,7 @@ def main():
             timeout=args.timeout,
             agent_args=agent_args,
             resume=args.resume,
+            keep_backups=args.keep_backups,
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)

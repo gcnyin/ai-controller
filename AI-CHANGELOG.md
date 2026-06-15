@@ -391,3 +391,13 @@
 
 *耗时 101.0s*
 
+## Round 2 — 2026-06-15 12:03:33
+
+改动说明: 新增 --keep-backups N 参数和 cleanup_old_backups 函数，在每轮备份后自动清理超出保留数量的旧备份目录，解决长时间运行后 .ai-controller-backups/ 无限制膨胀导致磁盘浪费的问题，向后兼容（默认 0=不限制）
+
+改动文件 (2 个):
+- `EADME.md`
+- `ai_controller.py`
+
+*耗时 142.9s*
+

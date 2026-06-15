@@ -40,6 +40,9 @@ python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --p
 
 # 中断后恢复，从上次断点继续
 python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
+
+# 只保留最近 5 个备份，自动清理旧备份
+python ai_controller.py ./my-project --agent pi --max-rounds 100 --keep-backups 5
 ```
 
 ## 参数
@@ -56,6 +59,7 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --resume
 | `--no-git` | 不自动 git commit | false |
 | `--agent-args` | 传递给 Agent 的额外参数，用引号包裹 | - |
 | `--resume` | 中断后恢复：读取 changelog 从下一轮继续 | false |
+| `--keep-backups` | 只保留最近 N 个备份，旧备份自动清理（0=不限制） | 0 |
 
 ## 工作流程
 
