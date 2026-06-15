@@ -422,12 +422,14 @@ class TestTaskListIO:
         assert loaded[0]["completed_time"] == ""
 
     def test_backup_task_file(self, tmp_workspace, sample_tasks):
-        """backup_task_file 创建 .bak 备份。"""
+        """backup_task_file 创建带日期时间的 .bak 备份。"""
         ac.save_task_list(tmp_workspace, sample_tasks)
         ac.backup_task_file(tmp_workspace)
 
-        bak_path = Path(tmp_workspace) / ac.TASK_FILE_BAK
-        assert bak_path.is_file()
+        # 查找匹配 AI-TASKS.md.YYYYMMDD_HHMMSS.bak 模式的文件
+        bak_files = list(Path(tmp_workspace).glob("AI-TASKS.md.*.bak"))
+        assert len(bak_files) == 1
+        bak_path = bak_files[0]
         # 原文件仍然存在
         assert (Path(tmp_workspace) / ac.TASK_FILE).is_file()
         # bak 内容应与原文件一致
@@ -438,7 +440,8 @@ class TestTaskListIO:
     def test_backup_task_file_no_source(self, tmp_workspace):
         """无原文件时 backup_task_file 不报错也不创建 bak。"""
         ac.backup_task_file(tmp_workspace)
-        assert not (Path(tmp_workspace) / ac.TASK_FILE_BAK).is_file()
+        bak_files = list(Path(tmp_workspace).glob("AI-TASKS.md.*.bak"))
+        assert len(bak_files) == 0
 
     def test_save_done_task_includes_timestamp(self, tmp_workspace, sample_tasks):
         """保存已完成任务时包含 completed_time 字段。"""
@@ -845,7 +848,7 @@ class TestLoggingFunctions:
         content = (Path(tmp_workspace) / "AI-CHANGELOG.md").read_text(encoding="utf-8")
         assert "Round 2" in content
         assert "无改动" in content
-        assert "无（本轮无代码变更）" in content
+        assert "无(本轮无代码变更)" in content
 
     def test_write_run_header(self, tmp_workspace):
         """write_run_header 在 changelog 中写入运行头部。"""

@@ -15,7 +15,7 @@ from .prompts import PLAN_PROMPT
 logger = logging.getLogger(__name__)
 
 TASK_FILE = "AI-TASKS.md"
-TASK_FILE_BAK = "AI-TASKS.md.bak"
+TASK_FILE_BAK = "AI-TASKS.md.bak"  # 旧常量，保留兼容
 
 
 def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
@@ -54,12 +54,15 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
 
 
 def backup_task_file(target_dir: str):
-    """备份现有 AI-TASKS.md 为 AI-TASKS.md.bak（用于 --replan）。"""
+    """备份现有 AI-TASKS.md 为 AI-TASKS.md.bak.YYYYMMDD_HHMMSS（用于 --replan）。"""
     src = Path(target_dir) / TASK_FILE
-    dst = Path(target_dir) / TASK_FILE_BAK
-    if src.is_file():
-        shutil.copy2(src, dst)
-        logger.info(f"已备份旧任务列表: {TASK_FILE_BAK}")
+    if not src.is_file():
+        return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_name = f"{TASK_FILE}.{timestamp}.bak"
+    dst = Path(target_dir) / bak_name
+    shutil.copy2(src, dst)
+    logger.info(f"已备份旧任务列表: {bak_name}")
 
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:
