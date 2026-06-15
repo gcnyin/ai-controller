@@ -34,6 +34,9 @@ python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
 
 # codex 跑 3 轮
 python ai_controller.py ./my-project --agent codex --max-rounds 3
+
+# pi 指定模型和 provider
+python ai_controller.py ./my-project --agent pi --agent-args '--model gpt-4o --provider openai'
 ```
 
 ## 参数
@@ -48,6 +51,7 @@ python ai_controller.py ./my-project --agent codex --max-rounds 3
 | `--sleep` | 每轮间隔秒数 | 2.0 |
 | `--no-backup` | 不备份 | false |
 | `--no-git` | 不自动 git commit | false |
+| `--agent-args` | 传递给 Agent 的额外参数，用引号包裹 | - |
 
 ## 工作流程
 

@@ -368,7 +368,8 @@ def cprint(msg: str, color: str = ""):
 
 def call_agent(agent: str, prompt: str, target_dir: str,
                ext_filter: Optional[str] = None,
-               timeout: int = 600) -> tuple[bool, str, str, float]:
+               timeout: int = 600,
+               extra_args: Optional[list] = None) -> tuple[bool, str, str, float]:
     """
     调用 agent 进行一轮修改。
     返回 (success, summary, raw_output, elapsed_seconds)
@@ -381,6 +382,10 @@ def call_agent(agent: str, prompt: str, target_dir: str,
         full_prompt = ext_filter + "\n\n" + prompt
 
     cmd_parts = [cfg["cmd"]] + cfg["args"]
+
+    # 追加用户传入的额外参数（如 --model, --verbose）
+    if extra_args:
+        cmd_parts.extend(extra_args)
 
     # 处理 cwd
     if cfg["cwd_option"]:
@@ -484,6 +489,7 @@ def run_loop(
     no_git: bool = False,
     sleep_between: float = 2.0,
     timeout: int = 600,
+    agent_args: Optional[list] = None,
 ):
     print()
     cprint("╔══════════════════════════════════════════╗", C.CYAN)
@@ -553,7 +559,7 @@ def run_loop(
         # 调用 agent
         prompt = build_round_prompt(round_num, max_rounds, prev_summary)
         success, summary, raw_output, elapsed = call_agent(
-            agent, prompt, target_dir, ext_filter, timeout,
+            agent, prompt, target_dir, ext_filter, timeout, agent_args,
         )
 
         print()  # 换行
@@ -640,6 +646,8 @@ def main():
                         help="不备份（危险！）")
     parser.add_argument("--no-git", action="store_true",
                         help="不自动 git commit")
+    parser.add_argument("--agent-args", default="",
+                        help="传递给 Agent 的额外参数，用引号包裹，如 --agent-args '--model gpt-4'")
 
     args = parser.parse_args()
 
@@ -653,6 +661,11 @@ def main():
     if shutil.which(agent_cmd) is None:
         cprint(f"错误: 找不到 {agent_cmd} 命令，请确认 {args.agent} 已安装", C.RED)
         sys.exit(1)
+
+    # 解析 agent 额外参数
+    agent_args = None
+    if args.agent_args:
+        agent_args = shlex.split(args.agent_args)
 
     # 解析后缀
     allowed_ext = None
@@ -675,6 +688,7 @@ def main():
             no_git=args.no_git,
             sleep_between=args.sleep,
             timeout=args.timeout,
+            agent_args=agent_args,
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
