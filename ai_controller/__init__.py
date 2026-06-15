@@ -1,0 +1,68 @@
+"""AI 自迭代控制器 —— 模块化包结构。
+
+模块划分：
+    logger  - 日志系统（ColoredFormatter, setup_logger, get_logger）
+    prompts - 提示词模板（PLAN_PROMPT, TASK_PROMPT, build_task_prompt）
+    agent   - Agent 调用（AGENTS 配置, call_agent, parse_summary）
+    tasks   - 任务列表管理（生成/加载/保存/标记）
+    backup  - 备份管理（backup_all, cleanup_old_backups）
+    git_ops - Git 操作（is_git_repo, has_changes, git_commit 等）
+    cli     - CLI 入口与主循环（main, run_loop 等）
+
+向后兼容：所有公开 API 及测试所需的私有函数均在包级别重新导出。
+"""
+
+import subprocess  # 测试需要 ac.subprocess.TimeoutExpired
+
+
+# ── 颜色工具（必须在子模块导入前定义，避免循环导入） ──
+
+class C:
+    """ANSI 颜色常量（供各模块共用）。"""
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    MAGENTA = "\033[35m"
+    BOLD = "\033[1m"
+    R = "\033[0m"
+
+
+def cprint(msg: str, color: str = ""):
+    """带颜色的 print，自动重置颜色。"""
+    print(f"{color}{msg}{C.R}")
+
+
+# ── 子模块重导出 ──
+
+from .logger import get_logger, setup_logger, ColoredFormatter, LOG_FILE, LOGGER_FILE
+from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
+from .agent import AGENTS, call_agent, parse_summary
+from .tasks import (
+    TASK_FILE,
+    generate_task_list,
+    save_task_list,
+    load_task_list,
+    mark_task_done,
+    get_next_pending_task,
+    _extract_json_tasks,
+    _try_parse_json,
+)
+from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
+from .git_ops import (
+    is_git_repo,
+    has_changes,
+    git_commit,
+    get_changed_files,
+    get_git_diff_summary,
+)
+from .cli import (
+    main,
+    run_loop,
+    build_ext_filter_arg,
+    check_ext_filter,
+    extract_model_hint,
+    init_log,
+    parse_changelog_for_resume,
+    write_round_log,
+)
