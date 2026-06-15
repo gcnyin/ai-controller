@@ -550,9 +550,9 @@ def init_log(target_dir: str, agent: str, model_hint: str = ""):
     同时初始化 logger 使其同时输出到控制台（带颜色）和 ai-controller.log 文件。
     """
     log_path = Path(target_dir) / LOG_FILE
+    model_str = f" ({model_hint})" if model_hint else ""
     if not log_path.exists():
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        model_str = f" ({model_hint})" if model_hint else ""
         log_path.write_text(
             f"# AI 自迭代改动记录\n\n"
             f"- 开始时间: {ts}\n"
@@ -949,7 +949,7 @@ def run_loop(
             get_logger().warning("无法加载任务列表，将重新生成。")
 
     if tasks is None:
-        tasks = generate_task_list(target_dir, ext_filter, timeout, agent_args)
+        tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
         if tasks is None:
             get_logger().warning("任务列表生成失败，回退到逐轮模式")
             _run_legacy_loop(
@@ -1304,7 +1304,7 @@ def main():
         cprint("╚══════════════════════════════════════════╝", C.CYAN)
         print()
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
-        tasks = generate_task_list(str(target), ext_filter, args.timeout, agent_args)
+        tasks = generate_task_list(args.agent, str(target), ext_filter, args.timeout, agent_args)
         if tasks is None:
             get_logger().error("规划失败，未能生成任务列表。")
             sys.exit(1)
