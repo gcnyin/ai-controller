@@ -506,6 +506,10 @@ def call_agent(agent: str, prompt: str, target_dir: str,
             print(stdout_data, end="", flush=True)
 
         summary = parse_summary(stdout_data)
+        # Agent 非零退出但输出中没有有效 SUMMARY 时，parse_summary 会返回
+        # 通用描述，这对失败场景有误导性。此时用明确的失败描述替换。
+        if proc.returncode != 0 and "未提供具体说明" in summary:
+            summary = f"Agent 异常退出（返回码 {proc.returncode}），未提供改动说明"
         return proc.returncode == 0, summary, stdout_data, elapsed
 
     except subprocess.TimeoutExpired:
