@@ -506,6 +506,11 @@ def run_loop(
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
     init_log(target_dir, agent)
+
+    # 检查工作区是否有未提交的改动，如有则警告用户
+    if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
+        cprint("  ⚠ 警告: 工作区存在未提交的改动，将与 AI 改动混合记录", C.YELLOW)
+
     consecutive_noops = 0
     round_num = 0
     prev_summary = ""
