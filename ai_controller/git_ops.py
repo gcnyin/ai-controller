@@ -1,12 +1,14 @@
 """Git 操作 —— 仓库检测、变动检测、自动提交等。"""
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 
-from . import SKIP_DIRS
-from .logger import get_logger, LOG_FILE
+from . import SKIP_DIRS, LOG_FILE
 from .backup import BACKUP_DIR_NAME
+
+logger = logging.getLogger(__name__)
 
 
 def is_git_repo(target_dir: str) -> bool:
@@ -46,7 +48,7 @@ def git_commit(target_dir: str, round_num: int):
         )
     except Exception:
         # git 提交失败不应中断主流程，自动提交是辅助功能，可忽略
-        get_logger().warning(f"Git 提交失败（Round {round_num}），继续执行")
+        logger.warning(f"Git 提交失败（Round {round_num}），继续执行")
 
 
 def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
@@ -92,7 +94,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
             return files
         except Exception:
             # git diff-index 失败时回退到文件时间戳方案，可忽略
-            get_logger().warning("git diff-index 失败，回退到文件时间戳方案")
+            logger.warning("git diff-index 失败，回退到文件时间戳方案")
 
     # ── 回退：基于文件系统时间戳（用于非 git 目录） ──
     if since_ts > 0:
@@ -113,7 +115,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
                         changed.append(rel)
                 except OSError:
                     # 文件可能已被删除或无权限读取，跳过该文件
-                    get_logger().warning(f"无法读取文件时间戳，已跳过: {fp}")
+                    logger.warning(f"无法读取文件时间戳，已跳过: {fp}")
         return sorted(changed)
 
     return []
@@ -134,5 +136,5 @@ def get_git_diff_summary(target_dir: str) -> str:
             return f"Git diff: {last}"
     except Exception:
         # git diff 失败时静默返回空字符串作为 fallback，可忽略
-        get_logger().warning("git diff --stat 失败，无法获取 diff 摘要")
+        logger.warning("git diff --stat 失败，无法获取 diff 摘要")
     return ""

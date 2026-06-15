@@ -2,7 +2,6 @@
 
 模块划分：
     config  - 配置文件读取（load_config）
-    logger  - 日志系统（ColoredFormatter, setup_logger, get_logger）
     prompts - 提示词模板（PLAN_PROMPT, TASK_PROMPT, build_task_prompt）
     agent   - Agent 调用（AGENTS 配置, call_agent, parse_summary）
     tasks   - 任务列表管理（生成/加载/保存/标记）
@@ -16,25 +15,10 @@
 import subprocess  # 测试需要 ac.subprocess.TimeoutExpired
 
 
-# ── 颜色工具（必须在子模块导入前定义，避免循环导入） ──
-
-class C:
-    """ANSI 颜色常量（供各模块共用）。"""
-    CYAN = "\033[36m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    RED = "\033[31m"
-    MAGENTA = "\033[35m"
-    BOLD = "\033[1m"
-    R = "\033[0m"
-
-
-def cprint(msg: str, color: str = ""):
-    """带颜色的 print，自动重置颜色。"""
-    print(f"{color}{msg}{C.R}")
-
-
 # ── 全局常量 ──
+
+LOG_FILE = "AI-CHANGELOG.md"
+LOGGER_FILE = "ai-controller.log"
 
 # 备份/遍历时需要跳过的目录，backup.py 和 git_ops.py 共用
 SKIP_DIRS = (".ai-controller-backups", ".git", "__pycache__", ".venv", "venv",
@@ -43,7 +27,6 @@ SKIP_DIRS = (".ai-controller-backups", ".git", "__pycache__", ".venv", "venv",
 
 # ── 子模块重导出 ──
 
-from .logger import get_logger, setup_logger, ColoredFormatter, LOG_FILE, LOGGER_FILE
 from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
 from .agent import AGENTS, call_agent, parse_summary, build_agent_command
 from .tasks import (

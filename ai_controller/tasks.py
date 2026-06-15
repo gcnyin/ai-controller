@@ -1,5 +1,6 @@
 """任务列表管理 —— 生成/解析/保存/加载/标记任务列表。"""
 
+import logging
 import re
 import json
 import shutil
@@ -7,10 +8,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from . import C, cprint
-from .logger import get_logger
+
 from .agent import call_agent
 from .prompts import PLAN_PROMPT
+
+logger = logging.getLogger(__name__)
 
 TASK_FILE = "AI-TASKS.md"
 TASK_FILE_BAK = "AI-TASKS.md.bak"
@@ -22,30 +24,30 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
     让 AI 扫描代码库并生成完整任务列表。
     返回解析后的任务列表，失败返回 None。
     """
-    cprint(f"\n{'─' * 55}", C.CYAN)
-    cprint(f"  📋 规划阶段：扫描代码库，生成任务列表...", C.BOLD + C.CYAN)
-    cprint(f"{'─' * 55}", C.CYAN)
+    print(f"\n{'─' * 55}")
+    print(f"  📋 规划阶段：扫描代码库，生成任务列表...")
+    print(f"{'─' * 55}")
 
     success, summary, raw_output, elapsed = call_agent(
         agent, PLAN_PROMPT, target_dir, ext_filter, timeout, agent_args,
         quiet=True,
     )
 
-    cprint(f"  ⏱ 规划耗时 {elapsed:.1f}s", C.CYAN)
+    print(f"  ⏱ 规划耗时 {elapsed:.1f}s")
 
     if not success:
-        get_logger().warning(f"规划失败: {summary}")
+        logger.warning(f"规划失败: {summary}")
         return None
 
     # 从输出中提取 JSON
     tasks = _extract_json_tasks(raw_output)
     if tasks is None:
         # 尝试把整段输出当 JSON 解析
-        get_logger().warning("无法从 Agent 输出中提取任务 JSON，尝试直接解析...")
+        logger.warning("无法从 Agent 输出中提取任务 JSON，尝试直接解析...")
         tasks = _try_parse_json(raw_output)
 
     if tasks is None:
-        get_logger().warning("无法解析任务列表，将回退到逐轮模式")
+        logger.warning("无法解析任务列表，将回退到逐轮模式")
         return None
 
     return tasks
@@ -57,7 +59,7 @@ def backup_task_file(target_dir: str):
     dst = Path(target_dir) / TASK_FILE_BAK
     if src.is_file():
         shutil.copy2(src, dst)
-        get_logger().info(f"已备份旧任务列表: {TASK_FILE_BAK}")
+        logger.info(f"已备份旧任务列表: {TASK_FILE_BAK}")
 
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:

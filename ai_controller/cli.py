@@ -12,9 +12,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple, List
 
-from . import C, cprint
+
+import logging
+
+from . import LOG_FILE, LOGGER_FILE
 from .config import load_config
-from .logger import get_logger, setup_logger, LOG_FILE
 from .agent import AGENTS, call_agent, build_agent_command
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
 from .tasks import (
@@ -98,11 +100,37 @@ def extract_model_hint(agent_args: Optional[list]) -> str:
     return hint
 
 
+def _setup_logging(target_dir: str):
+    """配置标准 logging：控制台 + 文件双输出。"""
+    root_logger = logging.getLogger("ai_controller")
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.handlers.clear()
+
+    # 控制台 handler — INFO 及以上
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    root_logger.addHandler(ch)
+
+    # 文件 handler — DEBUG 及以上
+    log_path = Path(target_dir) / LOGGER_FILE
+    fh = logging.FileHandler(str(log_path), encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root_logger.addHandler(fh)
+
+
+logger = logging.getLogger(__name__)
+
+
 def init_log(target_dir: str, agent: str, model_hint: str = ""):
-    """初始化 changelog 文件和双输出 logger。
+    """初始化 changelog 文件和日志系统。
 
     如果 AI-CHANGELOG.md 已存在则追加模式（不覆盖），
-    同时初始化 logger 使其同时输出到控制台（带颜色）和 ai-controller.log 文件。
+    同时初始化 logging 使其同时输出到控制台和 ai-controller.log 文件。
     """
     log_path = Path(target_dir) / LOG_FILE
     model_str = f" ({model_hint})" if model_hint else ""
@@ -118,8 +146,7 @@ def init_log(target_dir: str, agent: str, model_hint: str = ""):
         )
 
     # 设置双输出 logger（控制台 + 文件）
-    setup_logger(target_dir)
-    logger = get_logger()
+    _setup_logging(target_dir)
     logger.info(f"AI 自迭代控制器启动 — Agent: {agent}{model_str}, 目标: {target_dir}")
 
 
@@ -138,7 +165,7 @@ def write_run_header(target_dir: str, run_count: int):
     with open(log_path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-    get_logger().info(f"运行 #{run_count} 开始")
+    logger.info(f"运行 #{run_count} 开始")
 
 
 def write_round_log(
@@ -212,7 +239,7 @@ def _execute_single_round(
     if not no_backup and not git_repo:
         backup_folder = backup_all(target_dir, round_num)
         if backup_folder:
-            cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
+            print(f"  💾 已备份到: {backup_folder}")
         if keep_backups > 0:
             cleanup_old_backups(target_dir, keep_backups)
     before_ts = time.time()
@@ -231,19 +258,19 @@ def _execute_single_round(
 
     # ── Agent 异常且无改动：记录日志后返回 ──
     if not success and not has_diff:
-        get_logger().warning(f"Agent 返回异常，{error_label}")
+        logger.warning(f"Agent 返回异常，{error_label}")
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
         return {"success": False, "summary": summary, "changed_files": [], "elapsed": elapsed, "has_diff": False}
 
     # ── Agent 异常但有改动：警告后继续处理 ──
     if not success and has_diff:
-        get_logger().warning("Agent 返回异常但仍有文件改动，继续处理...")
+        logger.warning("Agent 返回异常但仍有文件改动，继续处理...")
 
     # ── 扩展名过滤与日志记录 ──
     if has_diff:
         filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
         if bad_files:
-            get_logger().warning(
+            logger.warning(
                 f"Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
                 f"{', '.join(bad_files[:5])}"
                 f"{' ...' if len(bad_files) > 5 else ''}"
@@ -259,17 +286,17 @@ def _execute_single_round(
             diff_stat = get_git_diff_summary(target_dir)
             git_commit(target_dir, round_num)
             if diff_stat:
-                cprint(f"  ✓ 改动: {diff_stat}", C.GREEN)
+                print(f"  ✓ 改动: {diff_stat}")
             else:
-                cprint(f"  ✓ 已提交改动", C.GREEN)
+                print(f"  ✓ 已提交改动")
         else:
-            cprint(f"  ✓ 修改了 {len(changed_files)} 个文件", C.GREEN)
+            print(f"  ✓ 修改了 {len(changed_files)} 个文件")
 
-        cprint(f"  📝 {summary}", C.MAGENTA)
-        cprint(f"  📄 {', '.join(changed_files[:5])}"
-               f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
+        print(f"  📝 {summary}")
+        print(f"  📄 {', '.join(changed_files[:5])}"
+               f"{' ...' if len(changed_files) > 5 else ''}")
     else:
-        get_logger().info(f"本轮无文件改动 — {summary}")
+        logger.info(f"本轮无文件改动 — {summary}")
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
 
     return {"success": success, "summary": summary, "changed_files": changed_files, "elapsed": elapsed, "has_diff": has_diff}
@@ -294,42 +321,42 @@ def run_loop(
     dry_run: bool = False,
 ):
     print()
-    cprint("╔══════════════════════════════════════════╗", C.CYAN)
-    cprint("║      AI 自迭代控制器 v2.2               ║", C.CYAN)
-    cprint("╚══════════════════════════════════════════╝", C.CYAN)
+    print("╔══════════════════════════════════════════╗")
+    print("║      AI 自迭代控制器 v2.2               ║")
+    print("╚══════════════════════════════════════════╝")
     print()
-    cprint(f"  目标目录 : {target_dir}", C.BOLD)
-    cprint(f"  Agent    : {agent}", C.BOLD)
-    cprint(f"  超时     : {timeout}s", C.BOLD)
-    cprint(f"  最大轮次 : {'无限' if max_rounds == 0 else max_rounds}", C.BOLD)
+    print(f"  目标目录 : {target_dir}")
+    print(f"  Agent    : {agent}")
+    print(f"  超时     : {timeout}s")
+    print(f"  最大轮次 : {'无限' if max_rounds == 0 else max_rounds}")
     if allowed_ext:
-        cprint(f"  文件过滤 : {', '.join(sorted(allowed_ext))}", C.BOLD)
+        print(f"  文件过滤 : {', '.join(sorted(allowed_ext))}")
     git_repo_for_display = is_git_repo(target_dir) and not no_git
     if not no_backup and not git_repo_for_display:
-        cprint(f"  备份目录 : {BACKUP_DIR_NAME}/", C.BOLD)
+        print(f"  备份目录 : {BACKUP_DIR_NAME}/")
         if keep_backups > 0:
-            cprint(f"  备份保留 : 最近 {keep_backups} 个", C.BOLD)
+            print(f"  备份保留 : 最近 {keep_backups} 个")
     elif not no_backup and git_repo_for_display:
-        cprint(f"  备份     : 跳过（Git 仓库已有版本历史）", C.BOLD)
+        print(f"  备份     : 跳过（Git 仓库已有版本历史）")
     if is_git_repo(target_dir) and not no_git:
-        cprint(f"  Git      : 自动 commit", C.BOLD)
+        print(f"  Git      : 自动 commit")
     if no_plan:
-        cprint(f"  模式     : 逐轮模式（无任务列表）", C.BOLD)
+        print(f"  模式     : 逐轮模式（无任务列表）")
     if tasks_per_run > 0:
-        cprint(f"  任务限制 : 每次最多 {tasks_per_run} 个", C.BOLD)
+        print(f"  任务限制 : 每次最多 {tasks_per_run} 个")
     if dry_run:
-        cprint(f"  模式     : 预览模式（不实际修改任何文件）", C.YELLOW + C.BOLD)
+        print(f"  模式     : 预览模式（不实际修改任何文件）")
     print()
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
     model_hint = extract_model_hint(agent_args)
     init_log(target_dir, agent, model_hint)
     if model_hint:
-        cprint(f"  模型     : {model_hint}", C.BOLD)
+        print(f"  模型     : {model_hint}")
 
     # 检查工作区是否有未提交的改动，如有则警告用户
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
-        get_logger().warning("工作区存在未提交的改动，将与 AI 改动混合记录")
+        logger.warning("工作区存在未提交的改动，将与 AI 改动混合记录")
 
     # ─── 逐轮模式（--no-plan）：保持精简行为 ───
     if no_plan:
@@ -353,7 +380,7 @@ def run_loop(
         # --replan：备份旧文件，强制重新生成
         backup_task_file(target_dir)
         has_existing_tasks = False
-        get_logger().info("重新规划模式: 已备份旧任务列表，将生成全新任务列表")
+        logger.info("重新规划模式: 已备份旧任务列表，将生成全新任务列表")
 
     if has_existing_tasks:
         # 自动恢复：加载已有任务列表和元信息
@@ -363,16 +390,16 @@ def run_loop(
         if tasks:
             pending = [t for t in tasks if t.get("status") != "done"]
             done_count = len(tasks) - len(pending)
-            get_logger().info(
+            logger.info(
                 f"自动恢复: 从 {TASK_FILE} 加载 "
                 f"（已完成 {done_count}/{len(tasks)} 个任务，"
                 f"已运行 {metadata.get('run_count', 1)} 次）"
             )
             if not pending:
-                get_logger().info("任务列表中所有任务已完成，退出。")
+                logger.info("任务列表中所有任务已完成，退出。")
                 return
         else:
-            get_logger().warning("无法加载任务列表，将重新生成。")
+            logger.warning("无法加载任务列表，将重新生成。")
             tasks = None
 
     if tasks is None:
@@ -381,11 +408,11 @@ def run_loop(
             # 预览模式：如果已存在任务列表文件则直接加载，避免重新调用 Agent
             tasks = load_task_list(target_dir)
             metadata = load_task_metadata(target_dir)
-            get_logger().info("预览模式: 加载已有任务列表，跳过规划阶段 Agent 调用")
+            logger.info("预览模式: 加载已有任务列表，跳过规划阶段 Agent 调用")
         if tasks is None:
             tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
         if tasks is None:
-            get_logger().warning("任务列表生成失败，回退到逐轮模式")
+            logger.warning("任务列表生成失败，回退到逐轮模式")
             write_run_header(target_dir, 1)
             _run_legacy_loop(
                 target_dir, agent, max_rounds, allowed_ext,
@@ -396,7 +423,7 @@ def run_loop(
             return
 
         if len(tasks) == 0:
-            get_logger().info("AI 评估后认为代码库已完善，无需改进")
+            logger.info("AI 评估后认为代码库已完善，无需改进")
             return
 
         # 全新生成：初始化元信息
@@ -406,7 +433,7 @@ def run_loop(
                        run_count=metadata["run_count"],
                        last_run=metadata["last_run"],
                        global_round=metadata["global_round"])
-        logger = get_logger()
+        logger = logger
         logger.info(f"任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}")
 
         # 打印全部任务概览
@@ -436,13 +463,13 @@ def run_loop(
         # 获取下一个待执行任务（从内存缓存查找，避免重复解析文件）
         task = get_next_pending_task(target_dir, tasks)
         if task is None:
-            get_logger().info("所有任务已完成！")
+            logger.info("所有任务已完成！")
             break
 
         # 单次运行任务数限制
         if tasks_per_run > 0 and tasks_done_this_run >= tasks_per_run:
             pending_left = sum(1 for t in tasks if t.get("status") != "done")
-            get_logger().info(
+            logger.info(
                 f"本次运行已处理 {tasks_per_run} 个任务（剩余 {pending_left} 个待执行），退出。"
             )
             break
@@ -451,7 +478,7 @@ def run_loop(
 
         if max_rounds > 0 and round_num > max_rounds:
             pending_left = sum(1 for t in tasks if t.get("status") != "done")
-            get_logger().info(
+            logger.info(
                 f"达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。"
             )
             break
@@ -460,7 +487,7 @@ def run_loop(
         if consecutive_noops >= 3:
             tid = task.get("id", "?")
             title = task.get("title", "")
-            get_logger().info(
+            logger.info(
                 f"连续 {consecutive_noops} 轮无改动，跳过任务 #{tid} — {title}"
             )
             mark_task_done(target_dir, task["id"], round_num, tasks,
@@ -474,9 +501,9 @@ def run_loop(
         tid = task.get("id", "?")
         title = task.get("title", "")
 
-        cprint(f"\n{'─' * 55}", C.CYAN)
-        cprint(f"  第 {round_num} 轮: 执行任务 #{tid} — {title}", C.BOLD + C.CYAN)
-        cprint(f"{'─' * 55}", C.CYAN)
+        print(f"\n{'─' * 55}")
+        print(f"  第 {round_num} 轮: 执行任务 #{tid} — {title}")
+        print(f"{'─' * 55}")
 
         # 构建任务 prompt 并执行单轮
         prompt = build_task_prompt(task)
@@ -505,7 +532,7 @@ def run_loop(
             consecutive_noops = 0
         tasks_done_this_run += 1
 
-        cprint(f"  ⏳ 等待 {sleep_between}s...", C.CYAN)
+        print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)
 
     # ─── 退出前保存最终状态 ───
@@ -540,18 +567,18 @@ def _run_legacy_loop(
         round_num += 1
 
         if max_rounds > 0 and round_num > max_rounds:
-            get_logger().info(f"达到最大轮次 {max_rounds}，退出。")
-            cprint(f"\n✓ 达到最大轮次 {max_rounds}，退出。", C.GREEN)
+            logger.info(f"达到最大轮次 {max_rounds}，退出。")
+            print(f"\n✓ 达到最大轮次 {max_rounds}，退出。")
             break
 
         if consecutive_noops >= 3:
-            get_logger().info(f"连续 {consecutive_noops} 轮无改动，代码已稳定，退出。")
-            cprint(f"\n✓ 连续 {consecutive_noops} 轮无改动，代码已稳定，退出。", C.GREEN)
+            logger.info(f"连续 {consecutive_noops} 轮无改动，代码已稳定，退出。")
+            print(f"\n✓ 连续 {consecutive_noops} 轮无改动，代码已稳定，退出。")
             break
 
-        cprint(f"\n{'─' * 55}", C.CYAN)
-        cprint(f"  第 {round_num} 轮迭代{' (无限)' if max_rounds == 0 else f' / {max_rounds}'}", C.BOLD + C.CYAN)
-        cprint(f"{'─' * 55}", C.CYAN)
+        print(f"\n{'─' * 55}")
+        print(f"  第 {round_num} 轮迭代{' (无限)' if max_rounds == 0 else f' / {max_rounds}'}")
+        print(f"{'─' * 55}")
 
         # 构建每轮通用 prompt
         parts = [TASK_PROMPT]
@@ -593,7 +620,7 @@ def _run_legacy_loop(
             consecutive_noops += 1
             prev_summary = ""
 
-        cprint(f"  ⏳ 等待 {sleep_between}s...", C.CYAN)
+        print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)
 
 
@@ -618,23 +645,23 @@ def _print_dry_run_round(agent: str, round_num: int, prompt: str,
                          agent_args: Optional[list], ext_filter: Optional[str],
                          target_dir: str):
     """预览模式：打印单轮的详细执行计划，不实际调用 Agent。"""
-    cprint(f"\n  ╔{'═' * 51}╗", C.YELLOW)
-    cprint(f"  ║  预览轮次 #{round_num} — 以下为计划执行内容，不会实际修改文件 ║", C.YELLOW)
-    cprint(f"  ╚{'═' * 51}╝", C.YELLOW)
+    print(f"\n  ╔{'═' * 51}╗")
+    print(f"  ║  预览轮次 #{round_num} — 以下为计划执行内容，不会实际修改文件 ║")
+    print(f"  ╚{'═' * 51}╝")
 
-    cprint(f"  📋 本轮任务提示词:", C.BOLD)
+    print(f"  📋 本轮任务提示词:")
     # 打印 prompt 的前面部分（截断过长内容）
     prompt_preview = prompt[:500]
     for line in prompt_preview.split("\n"):
-        cprint(f"     {line}", C.CYAN)
+        print(f"     {line}")
     if len(prompt) > 500:
-        cprint(f"     ...（共 {len(prompt)} 字符，已截断显示）", C.CYAN)
+        print(f"     ...（共 {len(prompt)} 字符，已截断显示）")
 
-    cprint(f"\n  🔧 计划执行的等价命令:", C.BOLD)
+    print(f"\n  🔧 计划执行的等价命令:")
     cmd = _build_dry_run_command(agent, prompt, agent_args, ext_filter, target_dir)
-    cprint(f"     {cmd}", C.GREEN)
+    print(f"     {cmd}")
 
-    cprint(f"\n  ⚡ 实际操作: 跳过 Agent 调用、备份、Git 提交", C.YELLOW)
+    print(f"\n  ⚡ 实际操作: 跳过 Agent 调用、备份、Git 提交")
 
 
 def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
@@ -642,19 +669,19 @@ def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
     """预览模式：遍历任务列表，打印每个待执行任务的详细计划。"""
     pending = [t for t in tasks if t.get("status") != "done"]
     if not pending:
-        get_logger().info("预览模式: 所有任务已完成，无待执行任务。")
+        logger.info("预览模式: 所有任务已完成，无待执行任务。")
         return
 
-    cprint(f"\n{'─' * 55}", C.CYAN)
-    cprint(f"  预览模式: 以下 {len(pending)} 个任务将按顺序执行（不会实际修改文件）", C.YELLOW + C.BOLD)
-    cprint(f"{'─' * 55}", C.CYAN)
+    print(f"\n{'─' * 55}")
+    print(f"  预览模式: 以下 {len(pending)} 个任务将按顺序执行（不会实际修改文件）")
+    print(f"{'─' * 55}")
 
     round_num = 0
     for task in pending:
         round_num += 1
         if max_rounds > 0 and round_num > max_rounds:
             remaining = len(pending) - round_num + 1
-            get_logger().info(f"预览模式: 达到最大轮次 {max_rounds}（剩余 {remaining} 个任务不会执行）")
+            logger.info(f"预览模式: 达到最大轮次 {max_rounds}（剩余 {remaining} 个任务不会执行）")
             break
 
         tid = task.get("id", "?")
@@ -663,20 +690,20 @@ def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
         ttype = task.get("type", "")
         prio = task.get("priority", "?")
 
-        cprint(f"\n{'─' * 55}", C.CYAN)
-        cprint(f"  任务 #{tid} [{prio}] [{ttype}] {title}", C.BOLD + C.CYAN)
-        cprint(f"{'─' * 55}", C.CYAN)
+        print(f"\n{'─' * 55}")
+        print(f"  任务 #{tid} [{prio}] [{ttype}] {title}")
+        print(f"{'─' * 55}")
 
-        cprint(f"  描述: {desc}", C.CYAN)
+        print(f"  描述: {desc}")
 
         # 构建任务 prompt 并打印计划
         prompt = build_task_prompt(task)
         _print_dry_run_round(agent, round_num, prompt, agent_args, None, target_dir)
 
-    cprint(f"\n{'─' * 55}", C.CYAN)
-    cprint(f"  预览完成: 共 {len(pending)} 个待执行任务，预览 {min(round_num, len(pending))} 个", C.GREEN + C.BOLD)
-    cprint(f"  运行不带 --dry-run 的命令可正式执行", C.CYAN)
-    cprint(f"{'─' * 55}", C.CYAN)
+    print(f"\n{'─' * 55}")
+    print(f"  预览完成: 共 {len(pending)} 个待执行任务，预览 {min(round_num, len(pending))} 个")
+    print(f"  运行不带 --dry-run 的命令可正式执行")
+    print(f"{'─' * 55}")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────
@@ -732,7 +759,7 @@ def main():
     prelim_target = Path(prelim_args.directory).resolve()
     config = load_config(str(prelim_target))
     if config:
-        logger = get_logger()
+        logger = logger
         log_target = str(prelim_target)
         logger.info(f"已加载配置文件: {', '.join(f'{k}={v}' for k, v in sorted(config.items()))}")
         parser.set_defaults(**config)
@@ -742,30 +769,30 @@ def main():
 
     target = Path(args.directory).resolve()
     if not target.is_dir():
-        get_logger().error(f"目录不存在: {args.directory}")
+        logger.error(f"目录不存在: {args.directory}")
         sys.exit(1)
 
     # 校验数值参数，在进入主循环前拦截非法输入，避免运行时出现难以理解的错误
     if args.max_rounds < 0:
-        get_logger().error(f"--max-rounds 不能为负数（0=无限），当前值: {args.max_rounds}")
+        logger.error(f"--max-rounds 不能为负数（0=无限），当前值: {args.max_rounds}")
         sys.exit(1)
     if args.timeout <= 0:
-        get_logger().error(f"--timeout 必须为正数，当前值: {args.timeout}")
+        logger.error(f"--timeout 必须为正数，当前值: {args.timeout}")
         sys.exit(1)
     if args.sleep < 0:
-        get_logger().error(f"--sleep 不能为负数，当前值: {args.sleep}")
+        logger.error(f"--sleep 不能为负数，当前值: {args.sleep}")
         sys.exit(1)
     if args.keep_backups < 0:
-        get_logger().error(f"--keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}")
+        logger.error(f"--keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}")
         sys.exit(1)
     if args.tasks_per_run < 0:
-        get_logger().error(f"--tasks-per-run 不能为负数（0=不限制），当前值: {args.tasks_per_run}")
+        logger.error(f"--tasks-per-run 不能为负数（0=不限制），当前值: {args.tasks_per_run}")
         sys.exit(1)
 
     # 检查 agent 是否可用
     agent_cmd = AGENTS[args.agent]["cmd"]
     if shutil.which(agent_cmd) is None:
-        get_logger().error(f"找不到 {agent_cmd} 命令，请确认 {args.agent} 已安装")
+        logger.error(f"找不到 {agent_cmd} 命令，请确认 {args.agent} 已安装")
         sys.exit(1)
 
     # 解析 agent 额外参数
@@ -787,9 +814,9 @@ def main():
     # --plan-only：只生成任务列表
     if args.plan_only:
         print()
-        cprint("╔══════════════════════════════════════════╗", C.CYAN)
-        cprint("║      AI 自迭代控制器 v2.2 (仅规划)       ║", C.CYAN)
-        cprint("╚══════════════════════════════════════════╝", C.CYAN)
+        print("╔══════════════════════════════════════════╗")
+        print("║      AI 自迭代控制器 v2.2 (仅规划)       ║")
+        print("╚══════════════════════════════════════════╝")
         print()
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
 
@@ -799,14 +826,14 @@ def main():
 
         tasks = generate_task_list(args.agent, str(target), ext_filter, args.timeout, agent_args)
         if tasks is None:
-            get_logger().error("规划失败，未能生成任务列表。")
+            logger.error("规划失败，未能生成任务列表。")
             sys.exit(1)
         if len(tasks) == 0:
-            get_logger().info("AI 评估后认为代码库已完善，无需改进。")
+            logger.info("AI 评估后认为代码库已完善，无需改进。")
         else:
             save_task_list(str(target), tasks, run_count=1,
                            last_run="", global_round=0)
-            get_logger().info(f"任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）")
+            logger.info(f"任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）")
         sys.exit(0)
 
     try:
@@ -827,8 +854,8 @@ def main():
             dry_run=args.dry_run,
         )
     except KeyboardInterrupt:
-        cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
-        get_logger().warning("用户中断，退出。")
+        print("\n\n⏹ 用户中断，退出。")
+        logger.warning("用户中断，退出。")
 
 
 if __name__ == "__main__":

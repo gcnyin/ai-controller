@@ -5,8 +5,6 @@ import time
 import shlex
 import subprocess
 
-from . import C, cprint
-from .logger import get_logger
 
 # ─── Agent 配置 ────────────────────────────────────────────────────────
 
@@ -93,11 +91,11 @@ def call_agent(agent: str, prompt: str, target_dir: str,
     )
 
     if not quiet:
-        cprint(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...", C.CYAN)
+        print(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...")
     else:
         # 静默模式只显示简短提示
         prompt_preview = prompt[:80].replace('\n', ' ')
-        cprint(f"  🚀 {agent} 工作中... ({prompt_preview}...)", C.CYAN)
+        print(f"  🚀 {agent} 工作中... ({prompt_preview}...)")
 
     start = time.time()
     try:
@@ -138,7 +136,7 @@ def call_agent(agent: str, prompt: str, target_dir: str,
         elapsed = time.time() - start
         if not quiet and partial_stdout:
             print(partial_stdout, end="", flush=True)
-        cprint(f"\n  Agent 超时（{timeout} 秒）", C.RED)
+        print(f"\n  Agent 超时（{timeout} 秒）")
         return False, "Agent 执行超时", partial_stdout, elapsed
     except KeyboardInterrupt:
         proc.kill()
@@ -149,5 +147,5 @@ def call_agent(agent: str, prompt: str, target_dir: str,
         raise
     except Exception as e:
         elapsed = time.time() - start
-        cprint(f"  Agent 调用失败: {e}", C.RED)
+        print(f"  Agent 调用失败: {e}")
         return False, f"调用失败: {e}", "", elapsed
