@@ -193,6 +193,29 @@ def build_ext_filter_arg(agent: str, exts: Optional[set]) -> Optional[str]:
     return f"只处理 {ext_list} 文件，忽略其他文件类型。"
 
 
+def check_ext_filter(changed_files: list[str], allowed_ext: Optional[set]) -> tuple[list[str], list[str]]:
+    """将改动文件按后缀过滤，分为匹配和不匹配两组。
+
+    如果 allowed_ext 为 None，所有文件都视为匹配。
+    匹配规则：文件后缀必须在 allowed_ext 集合中（含前置点，如 {'.py', '.ts'}）。
+
+    Returns:
+        (matching_files, non_matching_files) — 匹配的文件列表和不匹配的文件列表
+    """
+    if not allowed_ext:
+        return changed_files, []
+
+    matching = []
+    non_matching = []
+    for f in changed_files:
+        _, ext = os.path.splitext(f)
+        if ext in allowed_ext:
+            matching.append(f)
+        else:
+            non_matching.append(f)
+    return matching, non_matching
+
+
 # ─── 备份 ──────────────────────────────────────────────────────────────
 
 def backup_all(target_dir: str, round_num: int) -> Optional[Path]:
@@ -604,16 +627,6 @@ def run_loop(
 
         # 记录改动前的 git 状态
         git_repo = is_git_repo(target_dir) and not no_git
-        before_hash = None
-        if git_repo:
-            try:
-                r = subprocess.run(
-                    ["git", "-C", target_dir, "rev-parse", "HEAD"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                before_hash = r.stdout.strip()
-            except Exception:
-                pass
 
         # 记录时间戳，用于非 git 目录下的文件改动检测
         before_ts = time.time()
@@ -646,6 +659,20 @@ def run_loop(
 
         # 以下处理有文件改动或无改动的正常情况
         if has_diff:
+            # 校验文件后缀过滤规则：如果用户指定了 --ext，检查 Agent 是否遵守
+            filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
+            if bad_files:
+                cprint(f"  ⚠ Agent 修改了 {len(bad_files)} 个非目标后缀文件 (--ext 过滤): "
+                       f"{', '.join(bad_files[:5])}"
+                       f"{' ...' if len(bad_files) > 5 else ''}", C.YELLOW)
+                # 将不匹配文件追加到改动说明中，记录在 changelog 里
+                suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件: " \
+                              f"{', '.join(bad_files[:5])}"
+                if len(bad_files) > 5:
+                    suffix_note += f" ..."
+                suffix_note += "]"
+                summary = summary + suffix_note
+
             # 关键顺序说明：
             # 1. get_git_diff_summary 最先 —— 避免 changelog 自身的变更污染 diff 摘要
             # 2. write_round_log 在 commit 之前 —— 确保当轮 changelog 随改动一起提交
