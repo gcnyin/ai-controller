@@ -1,0 +1,17 @@
+# AI 自迭代控制器 备份目录
+.ai-controller-backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
