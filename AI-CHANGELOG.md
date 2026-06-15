@@ -382,3 +382,12 @@
 
 *耗时 166.0s*
 
+## Round 1 — 2026-06-15 12:01:08
+
+改动说明: 修复 get_changed_files 未过滤控制器自身管理文件（AI-CHANGELOG.md 和备份目录）导致 changelog 自己记录自己的 bug，使改动文件列表只包含真正的项目文件
+
+改动文件 (1 个):
+- `i_controller.py`
+
+*耗时 101.0s*
+

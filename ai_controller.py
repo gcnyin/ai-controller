@@ -319,6 +319,9 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
     """
     target_path = Path(target_dir)
 
+    # 控制器自身的管理文件，不应计入项目改动
+    controller_files = {LOG_FILE}
+
     # ── 优先：git 仓库 ──
     if (target_path / ".git").is_dir():
         try:
@@ -336,8 +339,14 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
                 # 处理重命名格式: "old -> new"
                 if " -> " in path:
                     path = path.split(" -> ")[-1]
-                if path:
-                    files.append(path)
+                if not path:
+                    continue
+                # 过滤控制器自身的管理文件
+                if path in controller_files:
+                    continue
+                if path.startswith(BACKUP_DIR_NAME + "/") or path == BACKUP_DIR_NAME:
+                    continue
+                files.append(path)
             return files
         except Exception:
             pass
@@ -352,6 +361,9 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
             # 过滤要跳过的目录
             dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".ai-controller-")]
             for f in files:
+                # 过滤控制器自身的管理文件
+                if f == LOG_FILE:
+                    continue
                 fp = os.path.join(root, f)
                 try:
                     if os.path.getmtime(fp) > since_ts:
