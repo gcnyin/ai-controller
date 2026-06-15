@@ -28,6 +28,7 @@ import time
 import shutil
 import shlex
 import json
+import logging
 import argparse
 import textwrap
 import subprocess
@@ -130,6 +131,91 @@ TASK_PROMPT = textwrap.dedent("""\
 
 
 LOG_FILE = "AI-CHANGELOG.md"
+LOGGER_FILE = "ai-controller.log"
+
+# ─── 日志系统 ──────────────────────────────────────────────────────────
+
+_logger: Optional[logging.Logger] = None
+
+
+class ColoredFormatter(logging.Formatter):
+    """带 ANSI 颜色的控制台日志格式化器。
+
+    根据日志级别自动添加颜色：DEBUG=青色, INFO=绿色,
+    WARNING=黄色, ERROR=红色, CRITICAL=粗体红色。
+    文件输出使用无颜色的纯文本。
+
+    注意：使用 copy() 创建 record 副本以避免 ANSI 颜色码
+    泄漏到后续的 handler（如 FileHandler）。
+    """
+    COLORS = {
+        logging.DEBUG: "\033[36m",          # CYAN
+        logging.INFO: "\033[32m",           # GREEN
+        logging.WARNING: "\033[33m",        # YELLOW
+        logging.ERROR: "\033[31m",          # RED
+        logging.CRITICAL: "\033[1m\033[31m", # BOLD RED
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, "")
+        if color:
+            # 复制 record 避免颜色码泄漏到其他 handler
+            record = logging.makeLogRecord(record.__dict__)
+            record.levelname = f"{color}{record.levelname}{self.RESET}"
+            record.msg = f"{color}{record.msg}{self.RESET}"
+        return super().format(record)
+
+
+def setup_logger(target_dir: str) -> logging.Logger:
+    """配置双输出 logger：控制台（带颜色）+ 文件（纯文本）。
+
+    控制台 handler：INFO 及以上级别，带 ANSI 颜色。
+    文件 handler：DEBUG 及以上级别，无颜色，写入 ai-controller.log。
+
+    Args:
+        target_dir: 目标目录，日志文件将写入该目录下的 ai-controller.log
+    Returns:
+        配置好的 logger 实例
+    """
+    global _logger
+    logger = logging.getLogger("ai-controller")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    # 控制台 handler — INFO 及以上，带颜色
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(ColoredFormatter("%(message)s"))
+    logger.addHandler(ch)
+
+    # 文件 handler — DEBUG 及以上，纯文本
+    log_path = Path(target_dir) / LOGGER_FILE
+    fh = logging.FileHandler(str(log_path), encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(fh)
+
+    _logger = logger
+    return logger
+
+
+def get_logger() -> logging.Logger:
+    """获取全局 logger（未初始化时返回一个基础 console logger）。"""
+    global _logger
+    if _logger is not None:
+        return _logger
+    # 回退：基础 console logger
+    logger = logging.getLogger("ai-controller")
+    if not logger.handlers:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        logger.addHandler(ch)
+    logger.setLevel(logging.INFO)
+    return logger
 
 
 def build_task_prompt(task: dict) -> str:
@@ -158,18 +244,18 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
     cprint(f"  ⏱ 规划耗时 {elapsed:.1f}s", C.CYAN)
 
     if not success:
-        cprint(f"  ⚠ 规划失败: {summary}", C.YELLOW)
+        get_logger().warning(f"规划失败: {summary}")
         return None
 
     # 从输出中提取 JSON
     tasks = _extract_json_tasks(raw_output)
     if tasks is None:
         # 尝试把整段输出当 JSON 解析
-        cprint(f"  ⚠ 无法从 Agent 输出中提取任务 JSON，尝试直接解析...", C.YELLOW)
+        get_logger().warning("无法从 Agent 输出中提取任务 JSON，尝试直接解析...")
         tasks = _try_parse_json(raw_output)
 
     if tasks is None:
-        cprint(f"  ⚠ 无法解析任务列表，将回退到逐轮模式", C.YELLOW)
+        get_logger().warning("无法解析任务列表，将回退到逐轮模式")
         return None
 
     return tasks
@@ -458,20 +544,28 @@ def extract_model_hint(agent_args: Optional[list]) -> str:
 
 
 def init_log(target_dir: str, agent: str, model_hint: str = ""):
-    """初始化 changelog 文件"""
+    """初始化 changelog 文件和双输出 logger。
+
+    如果 AI-CHANGELOG.md 已存在则追加模式（不覆盖），
+    同时初始化 logger 使其同时输出到控制台（带颜色）和 ai-controller.log 文件。
+    """
     log_path = Path(target_dir) / LOG_FILE
-    if log_path.exists():
-        return  # 追加模式，不覆盖
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    model_str = f" ({model_hint})" if model_hint else ""
-    log_path.write_text(
-        f"# AI 自迭代改动记录\n\n"
-        f"- 开始时间: {ts}\n"
-        f"- Agent: {agent}{model_str}\n"
-        f"- 目标目录: {target_dir}\n\n"
-        f"---\n\n",
-        encoding="utf-8",
-    )
+    if not log_path.exists():
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        model_str = f" ({model_hint})" if model_hint else ""
+        log_path.write_text(
+            f"# AI 自迭代改动记录\n\n"
+            f"- 开始时间: {ts}\n"
+            f"- Agent: {agent}{model_str}\n"
+            f"- 目标目录: {target_dir}\n\n"
+            f"---\n\n",
+            encoding="utf-8",
+        )
+
+    # 设置双输出 logger（控制台 + 文件）
+    setup_logger(target_dir)
+    logger = get_logger()
+    logger.info(f"AI 自迭代控制器启动 — Agent: {agent}{model_str}, 目标: {target_dir}")
 
 
 def parse_changelog_for_resume(target_dir: str) -> Optional[Tuple[int, str]]:
@@ -539,6 +633,13 @@ def write_round_log(
     log_path = Path(target_dir) / LOG_FILE
     with open(log_path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+    # 同时输出到 logger（控制台 + 日志文件）
+    logger = get_logger()
+    file_list = ", ".join(changed_files[:8]) if changed_files else "无"
+    if len(changed_files) > 8:
+        file_list += f" ...共{len(changed_files)}个"
+    logger.info(f"Round #{round_num} | 耗时 {elapsed:.1f}s | {summary} | 文件: {file_list}")
 
 
 def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
@@ -821,7 +922,7 @@ def run_loop(
 
     # 检查工作区是否有未提交的改动，如有则警告用户
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
-        cprint("  ⚠ 警告: 工作区存在未提交的改动，将与 AI 改动混合记录", C.YELLOW)
+        get_logger().warning("工作区存在未提交的改动，将与 AI 改动混合记录")
 
     # ─── 逐轮模式（--no-plan）：保持原有行为 ───
     if no_plan:
@@ -840,17 +941,17 @@ def run_loop(
         tasks = load_task_list(target_dir)
         if tasks:
             pending = [t for t in tasks if t.get("status") != "done"]
-            cprint(f"  恢复模式 : 从任务列表恢复（已完成 {len(tasks) - len(pending)}/{len(tasks)} 个任务）", C.BOLD + C.CYAN)
+            get_logger().info(f"恢复模式: 从任务列表恢复（已完成 {len(tasks) - len(pending)}/{len(tasks)} 个任务）")
             if not pending:
-                cprint(f"  ✓ 任务列表中所有任务已完成，退出。", C.GREEN)
+                get_logger().info("任务列表中所有任务已完成，退出。")
                 return
         else:
-            cprint("  ⚠ 无法加载任务列表，将重新生成。", C.YELLOW)
+            get_logger().warning("无法加载任务列表，将重新生成。")
 
     if tasks is None:
         tasks = generate_task_list(target_dir, ext_filter, timeout, agent_args)
         if tasks is None:
-            cprint("  ⚠ 任务列表生成失败，回退到逐轮模式", C.YELLOW)
+            get_logger().warning("任务列表生成失败，回退到逐轮模式")
             _run_legacy_loop(
                 target_dir, agent, max_rounds, allowed_ext,
                 no_backup, no_git, sleep_between, timeout,
@@ -859,16 +960,18 @@ def run_loop(
             return
 
         if len(tasks) == 0:
-            cprint(f"\n  ✓ AI 评估后认为代码库已完善，无需改进", C.GREEN)
+            get_logger().info("AI 评估后认为代码库已完善，无需改进")
             return
 
         save_task_list(target_dir, tasks)
-        cprint(f"  ✓ 任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}", C.GREEN)
-        # 打印任务概览
-        for t in tasks[:10]:
-            cprint(f"    #{t.get('id')} [{t.get('priority', '?')}] {t.get('title', '')}", C.CYAN)
-        if len(tasks) > 10:
-            cprint(f"    ... 还有 {len(tasks) - 10} 个任务", C.CYAN)
+        logger = get_logger()
+        logger.info(f"任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}")
+        # 打印全部任务概览（同时输出到控制台和日志文件）
+        logger.info(f"{'─' * 40}")
+        logger.info(f"任务列表（共 {len(tasks)} 个）:")
+        for t in tasks:
+            logger.info(f"  #{t.get('id')} [{t.get('priority', '?')}] [{t.get('type', '')}] {t.get('title', '')}")
+        logger.info(f"{'─' * 40}")
 
     # 阶段 2：逐条执行任务
     round_num = parse_changelog_for_resume(target_dir)
@@ -879,18 +982,18 @@ def run_loop(
         # 获取下一个待执行任务
         task = get_next_pending_task(target_dir)
         if task is None:
-            cprint(f"\n  ✓ 所有任务已完成！🎉", C.GREEN)
+            get_logger().info("所有任务已完成！")
             break
 
         round_num += 1
 
         if max_rounds > 0 and round_num > max_rounds:
             pending_left = len([t for t in (load_task_list(target_dir) or []) if t.get("status") != "done"])
-            cprint(f"\n  ✓ 达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。", C.GREEN)
+            get_logger().info(f"达到最大轮次 {max_rounds}（剩余 {pending_left} 个待执行任务），退出。")
             break
 
         if consecutive_noops >= 3:
-            cprint(f"\n  ✓ 连续 {consecutive_noops} 轮无改动，退出。", C.GREEN)
+            get_logger().info(f"连续 {consecutive_noops} 轮无改动，退出。")
             break
 
         tid = task.get("id", "?")
@@ -924,21 +1027,21 @@ def run_loop(
         has_diff = bool(changed_files)
 
         if not success and not has_diff:
-            cprint(f"  Agent 返回异常，跳过此任务...", C.YELLOW)
+            get_logger().warning(f"Agent 返回异常，跳过任务 #{tid}")
             write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
             consecutive_noops += 1
             time.sleep(sleep_between)
             continue
 
         if not success and has_diff:
-            cprint(f"  Agent 返回异常但仍有文件改动，继续处理...", C.YELLOW)
+            get_logger().warning(f"Agent 返回异常但仍有文件改动，继续处理...")
 
         if has_diff:
             filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
             if bad_files:
-                cprint(f"  ⚠ Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
+                get_logger().warning(f"Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
                        f"{', '.join(bad_files[:5])}"
-                       f"{' ...' if len(bad_files) > 5 else ''}", C.YELLOW)
+                       f"{' ...' if len(bad_files) > 5 else ''}")
                 suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件]"
                 summary = summary + suffix_note
 
@@ -962,8 +1065,7 @@ def run_loop(
             mark_task_done(target_dir, task["id"], round_num)
             consecutive_noops = 0
         else:
-            cprint(f"  本轮无文件改动", C.YELLOW)
-            cprint(f"  AI 说明: {summary}", C.MAGENTA)
+            get_logger().info(f"本轮无文件改动 — {summary}")
             write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
             # 无改动时也标记完成，避免死循环在同一个任务上
             mark_task_done(target_dir, task["id"], round_num)
@@ -995,14 +1097,16 @@ def _run_legacy_loop(
     if resume:
         resume_info = parse_changelog_for_resume(target_dir)
         if resume_info is None:
+            get_logger().warning("无法解析 changelog 中的进度信息，从头开始。")
             cprint("  ⚠ 无法解析 changelog 中的进度信息，从头开始。", C.YELLOW)
         else:
             last_round, last_summary = resume_info
             if max_rounds > 0 and last_round >= max_rounds:
-                cprint(f"  ✓ 上次已完成 {last_round}/{max_rounds} 轮，无需恢复。", C.GREEN)
+                get_logger().info(f"上次已完成 {last_round}/{max_rounds} 轮，无需恢复。")
                 return
             round_num = last_round
             prev_summary = last_summary
+            get_logger().info(f"恢复模式: 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）")
             cprint(f"  恢复模式 : 从第 {last_round + 1} 轮继续（上次完成 {last_round} 轮）", C.BOLD + C.CYAN)
             print()
 
@@ -1010,10 +1114,12 @@ def _run_legacy_loop(
         round_num += 1
 
         if max_rounds > 0 and round_num > max_rounds:
+            get_logger().info(f"达到最大轮次 {max_rounds}，退出。")
             cprint(f"\n✓ 达到最大轮次 {max_rounds}，退出。", C.GREEN)
             break
 
         if consecutive_noops >= 3:
+            get_logger().info(f"连续 {consecutive_noops} 轮无改动，代码已稳定，退出。")
             cprint(f"\n✓ 连续 {consecutive_noops} 轮无改动，代码已稳定，退出。", C.GREEN)
             break
 
@@ -1056,7 +1162,7 @@ def _run_legacy_loop(
         has_diff = bool(changed_files)
 
         if not success and not has_diff:
-            cprint(f"  Agent 返回异常，等待后继续...", C.YELLOW)
+            get_logger().warning("Agent 返回异常，等待后继续...")
             write_round_log(target_dir, round_num, summary, [], elapsed)
             consecutive_noops += 1
             prev_summary = ""
@@ -1064,14 +1170,14 @@ def _run_legacy_loop(
             continue
 
         if not success and has_diff:
-            cprint(f"  Agent 返回异常但仍有文件改动，继续处理...", C.YELLOW)
+            get_logger().warning("Agent 返回异常但仍有文件改动，继续处理...")
 
         if has_diff:
             filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
             if bad_files:
-                cprint(f"  ⚠ Agent 修改了 {len(bad_files)} 个非目标后缀文件 (--ext 过滤): "
+                get_logger().warning(f"Agent 修改了 {len(bad_files)} 个非目标后缀文件 (--ext 过滤): "
                        f"{', '.join(bad_files[:5])}"
-                       f"{' ...' if len(bad_files) > 5 else ''}", C.YELLOW)
+                       f"{' ...' if len(bad_files) > 5 else ''}")
                 suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件: " \
                               f"{', '.join(bad_files[:5])}"
                 if len(bad_files) > 5:
@@ -1098,8 +1204,7 @@ def _run_legacy_loop(
             prev_summary = summary
             consecutive_noops = 0
         else:
-            cprint(f"  本轮无文件改动", C.YELLOW)
-            cprint(f"  AI 说明: {summary}", C.MAGENTA)
+            get_logger().info(f"本轮无文件改动 — {summary}")
             write_round_log(target_dir, round_num, summary, [], elapsed)
             consecutive_noops += 1
             prev_summary = ""
@@ -1152,27 +1257,27 @@ def main():
 
     target = Path(args.directory).resolve()
     if not target.is_dir():
-        cprint(f"错误: 目录不存在: {args.directory}", C.RED)
+        get_logger().error(f"目录不存在: {args.directory}")
         sys.exit(1)
 
     # 校验数值参数，在进入主循环前拦截非法输入，避免运行时出现难以理解的错误
     if args.max_rounds < 0:
-        cprint(f"错误: --max-rounds 不能为负数（0=无限），当前值: {args.max_rounds}", C.RED)
+        get_logger().error(f"--max-rounds 不能为负数（0=无限），当前值: {args.max_rounds}")
         sys.exit(1)
     if args.timeout <= 0:
-        cprint(f"错误: --timeout 必须为正数，当前值: {args.timeout}", C.RED)
+        get_logger().error(f"--timeout 必须为正数，当前值: {args.timeout}")
         sys.exit(1)
     if args.sleep < 0:
-        cprint(f"错误: --sleep 不能为负数，当前值: {args.sleep}", C.RED)
+        get_logger().error(f"--sleep 不能为负数，当前值: {args.sleep}")
         sys.exit(1)
     if args.keep_backups < 0:
-        cprint(f"错误: --keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}", C.RED)
+        get_logger().error(f"--keep-backups 不能为负数（0=不限制），当前值: {args.keep_backups}")
         sys.exit(1)
 
     # 检查 agent 是否可用
     agent_cmd = AGENTS[args.agent]["cmd"]
     if shutil.which(agent_cmd) is None:
-        cprint(f"错误: 找不到 {agent_cmd} 命令，请确认 {args.agent} 已安装", C.RED)
+        get_logger().error(f"找不到 {agent_cmd} 命令，请确认 {args.agent} 已安装")
         sys.exit(1)
 
     # 解析 agent 额外参数
@@ -1201,13 +1306,13 @@ def main():
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
         tasks = generate_task_list(str(target), ext_filter, args.timeout, agent_args)
         if tasks is None:
-            cprint("\n规划失败，未能生成任务列表。", C.RED)
+            get_logger().error("规划失败，未能生成任务列表。")
             sys.exit(1)
         if len(tasks) == 0:
-            cprint("\n✓ AI 评估后认为代码库已完善，无需改进。", C.GREEN)
+            get_logger().info("AI 评估后认为代码库已完善，无需改进。")
         else:
             save_task_list(str(target), tasks)
-            cprint(f"\n✓ 任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）", C.GREEN)
+            get_logger().info(f"任务列表已保存至 {TASK_FILE}（共 {len(tasks)} 个任务）")
         sys.exit(0)
 
     try:
@@ -1227,6 +1332,7 @@ def main():
         )
     except KeyboardInterrupt:
         cprint("\n\n⏹ 用户中断，退出。", C.YELLOW)
+        get_logger().warning("用户中断，退出。")
 
 
 if __name__ == "__main__":

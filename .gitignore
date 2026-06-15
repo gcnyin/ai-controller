@@ -1,6 +1,11 @@
 # AI 自迭代控制器 备份目录
 .ai-controller-backups/
 
+# AI 自迭代控制器 生成文件
+ai-controller.log
+AI-CHANGELOG.md
+AI-TASKS.md
+
 # Python
 __pycache__/
 *.pyc
