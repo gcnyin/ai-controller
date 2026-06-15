@@ -877,6 +877,109 @@ def git_commit(target_dir: str, round_num: int):
         pass
 
 
+# ─── 单轮执行（run_loop 和 _run_legacy_loop 共用） ─────────────────
+
+def _execute_single_round(
+    target_dir: str,
+    agent: str,
+    round_num: int,
+    prompt: str,
+    allowed_ext: Optional[set],
+    no_backup: bool,
+    no_git: bool,
+    timeout: int,
+    agent_args: Optional[list],
+    ext_filter: Optional[str],
+    keep_backups: int,
+    summary_prefix: str = "",
+    error_label: str = "Agent 返回异常",
+) -> dict:
+    """执行单轮迭代的核心逻辑：备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
+
+    此函数封装了 run_loop（任务模式）和 _run_legacy_loop（逐轮模式）共用的
+    重复代码，两个循环只保留差异化的调度逻辑（prompt 构建、任务标记、prev_summary 维护）。
+
+    Args:
+        summary_prefix: 写入 changelog 时加在 summary 前面的前缀（如 "[任务#1] "）
+        error_label: Agent 异常且无改动时的日志描述（如 "跳过任务 #1" 或 "等待后继续..."）
+
+    Returns:
+        dict with keys:
+            success: Agent 是否正常退出
+            summary: 本轮改动说明（可能已追加后缀过滤警告）
+            changed_files: 改动的文件列表
+            elapsed: Agent 执行耗时（秒）
+            has_diff: 是否有文件改动（Agent 异常且无改动时为 False）
+    """
+    # ── 备份 ──
+    if not no_backup:
+        backup_folder = backup_all(target_dir, round_num)
+        if backup_folder:
+            cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
+        if keep_backups > 0:
+            cleanup_old_backups(target_dir, keep_backups)
+
+    git_repo = is_git_repo(target_dir) and not no_git
+    before_ts = time.time()
+
+    # ── 调用 Agent ──
+    success, summary, raw_output, elapsed = call_agent(
+        agent, prompt, target_dir, ext_filter, timeout, agent_args,
+        quiet=True,
+    )
+
+    print()
+
+    # ── 检测文件改动 ──
+    changed_files = get_changed_files(target_dir, before_ts)
+    has_diff = bool(changed_files)
+
+    # ── Agent 异常且无改动：记录日志后返回 ──
+    if not success and not has_diff:
+        get_logger().warning(f"Agent 返回异常，{error_label}")
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
+        return {"success": False, "summary": summary, "changed_files": [], "elapsed": elapsed, "has_diff": False}
+
+    # ── Agent 异常但有改动：警告后继续处理 ──
+    if not success and has_diff:
+        get_logger().warning("Agent 返回异常但仍有文件改动，继续处理...")
+
+    # ── 扩展名过滤与日志记录 ──
+    if has_diff:
+        filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
+        if bad_files:
+            get_logger().warning(
+                f"Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
+                f"{', '.join(bad_files[:5])}"
+                f"{' ...' if len(bad_files) > 5 else ''}"
+            )
+            suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件]"
+            summary = summary + suffix_note
+
+        # ── 记录 changelog ──
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
+
+        # ── Git 提交 ──
+        if git_repo:
+            diff_stat = get_git_diff_summary(target_dir)
+            git_commit(target_dir, round_num)
+            if diff_stat:
+                cprint(f"  ✓ 改动: {diff_stat}", C.GREEN)
+            else:
+                cprint(f"  ✓ 已提交改动", C.GREEN)
+        else:
+            cprint(f"  ✓ 修改了 {len(changed_files)} 个文件", C.GREEN)
+
+        cprint(f"  📝 {summary}", C.MAGENTA)
+        cprint(f"  📄 {', '.join(changed_files[:5])}"
+               f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
+    else:
+        get_logger().info(f"本轮无文件改动 — {summary}")
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
+
+    return {"success": success, "summary": summary, "changed_files": changed_files, "elapsed": elapsed, "has_diff": has_diff}
+
+
 # ─── 主循环 ────────────────────────────────────────────────────────────
 
 def run_loop(
@@ -1003,70 +1106,25 @@ def run_loop(
         cprint(f"  第 {round_num} 轮: 执行任务 #{tid} — {title}", C.BOLD + C.CYAN)
         cprint(f"{'─' * 55}", C.CYAN)
 
-        # 备份
-        if not no_backup:
-            backup_folder = backup_all(target_dir, round_num)
-            if backup_folder:
-                cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
-            if keep_backups > 0:
-                cleanup_old_backups(target_dir, keep_backups)
-
-        git_repo = is_git_repo(target_dir) and not no_git
-        before_ts = time.time()
-
-        # 构建任务 prompt
+        # 构建任务 prompt 并执行单轮
         prompt = build_task_prompt(task)
-        success, summary, raw_output, elapsed = call_agent(
-            agent, prompt, target_dir, ext_filter, timeout, agent_args,
-            quiet=True,
+        result = _execute_single_round(
+            target_dir, agent, round_num, prompt, allowed_ext,
+            no_backup, no_git, timeout, agent_args, ext_filter,
+            keep_backups,
+            summary_prefix=f"[任务#{tid}] ",
+            error_label=f"跳过任务 #{tid}",
         )
 
-        print()
-
-        changed_files = get_changed_files(target_dir, before_ts)
-        has_diff = bool(changed_files)
-
-        if not success and not has_diff:
-            get_logger().warning(f"Agent 返回异常，跳过任务 #{tid}")
-            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
+        if not result["success"] and not result["has_diff"]:
             consecutive_noops += 1
             time.sleep(sleep_between)
             continue
 
-        if not success and has_diff:
-            get_logger().warning(f"Agent 返回异常但仍有文件改动，继续处理...")
-
-        if has_diff:
-            filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
-            if bad_files:
-                get_logger().warning(f"Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
-                       f"{', '.join(bad_files[:5])}"
-                       f"{' ...' if len(bad_files) > 5 else ''}")
-                suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件]"
-                summary = summary + suffix_note
-
-            if git_repo:
-                diff_stat = get_git_diff_summary(target_dir)
-            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", changed_files, elapsed)
-            if git_repo:
-                git_commit(target_dir, round_num)
-                if diff_stat:
-                    cprint(f"  ✓ 改动: {diff_stat}", C.GREEN)
-                else:
-                    cprint(f"  ✓ 已提交改动", C.GREEN)
-            else:
-                cprint(f"  ✓ 修改了 {len(changed_files)} 个文件", C.GREEN)
-
-            cprint(f"  📝 {summary}", C.MAGENTA)
-            cprint(f"  📄 {', '.join(changed_files[:5])}"
-                   f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
-
-            # 标记任务完成
+        if result["has_diff"]:
             mark_task_done(target_dir, task["id"], round_num)
             consecutive_noops = 0
         else:
-            get_logger().info(f"本轮无文件改动 — {summary}")
-            write_round_log(target_dir, round_num, f"[任务#{tid}] {summary}", [], elapsed)
             # 无改动时也标记完成，避免死循环在同一个任务上
             mark_task_done(target_dir, task["id"], round_num)
             consecutive_noops += 1
@@ -1127,16 +1185,6 @@ def _run_legacy_loop(
         cprint(f"  第 {round_num} 轮迭代{' (无限)' if max_rounds == 0 else f' / {max_rounds}'}", C.BOLD + C.CYAN)
         cprint(f"{'─' * 55}", C.CYAN)
 
-        if not no_backup:
-            backup_folder = backup_all(target_dir, round_num)
-            if backup_folder:
-                cprint(f"  💾 已备份到: {backup_folder}", C.GREEN)
-            if keep_backups > 0:
-                cleanup_old_backups(target_dir, keep_backups)
-
-        git_repo = is_git_repo(target_dir) and not no_git
-        before_ts = time.time()
-
         # 构建每轮通用 prompt
         parts = [TASK_PROMPT]
         round_info = f"\n\n## 当前迭代上下文\n\n这是第 {round_num} 轮"
@@ -1151,61 +1199,23 @@ def _run_legacy_loop(
             )
         prompt = "\n".join(parts)
 
-        success, summary, raw_output, elapsed = call_agent(
-            agent, prompt, target_dir, ext_filter, timeout, agent_args,
-            quiet=True,
+        result = _execute_single_round(
+            target_dir, agent, round_num, prompt, allowed_ext,
+            no_backup, no_git, timeout, agent_args, ext_filter,
+            keep_backups,
+            error_label="等待后继续...",
         )
 
-        print()
-
-        changed_files = get_changed_files(target_dir, before_ts)
-        has_diff = bool(changed_files)
-
-        if not success and not has_diff:
-            get_logger().warning("Agent 返回异常，等待后继续...")
-            write_round_log(target_dir, round_num, summary, [], elapsed)
+        if not result["success"] and not result["has_diff"]:
             consecutive_noops += 1
             prev_summary = ""
             time.sleep(sleep_between)
             continue
 
-        if not success and has_diff:
-            get_logger().warning("Agent 返回异常但仍有文件改动，继续处理...")
-
-        if has_diff:
-            filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
-            if bad_files:
-                get_logger().warning(f"Agent 修改了 {len(bad_files)} 个非目标后缀文件 (--ext 过滤): "
-                       f"{', '.join(bad_files[:5])}"
-                       f"{' ...' if len(bad_files) > 5 else ''}")
-                suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件: " \
-                              f"{', '.join(bad_files[:5])}"
-                if len(bad_files) > 5:
-                    suffix_note += f" ..."
-                suffix_note += "]"
-                summary = summary + suffix_note
-
-            if git_repo:
-                diff_stat = get_git_diff_summary(target_dir)
-            write_round_log(target_dir, round_num, summary, changed_files, elapsed)
-            if git_repo:
-                git_commit(target_dir, round_num)
-                if diff_stat:
-                    cprint(f"  ✓ 本轮改动: {diff_stat}", C.GREEN)
-                else:
-                    cprint(f"  ✓ 已提交改动", C.GREEN)
-            else:
-                cprint(f"  ✓ 本轮修改 {len(changed_files)} 个文件", C.GREEN)
-
-            cprint(f"  AI 说明: {summary}", C.MAGENTA)
-            cprint(f"  改动文件: {', '.join(changed_files[:5])}"
-                   f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
-
-            prev_summary = summary
+        if result["has_diff"]:
+            prev_summary = result["summary"]
             consecutive_noops = 0
         else:
-            get_logger().info(f"本轮无文件改动 — {summary}")
-            write_round_log(target_dir, round_num, summary, [], elapsed)
             consecutive_noops += 1
             prev_summary = ""
 
