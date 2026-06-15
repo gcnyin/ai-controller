@@ -580,8 +580,14 @@ def run_loop(
 
         # 以下处理有文件改动或无改动的正常情况
         if has_diff:
+            # 关键顺序说明：
+            # 1. get_git_diff_summary 最先 —— 避免 changelog 自身的变更污染 diff 摘要
+            # 2. write_round_log 在 commit 之前 —— 确保当轮 changelog 随改动一起提交
+            # 3. git_commit 最后 —— 将所有改动（含 changelog）一并提交
             if git_repo:
                 diff_stat = get_git_diff_summary(target_dir)
+            write_round_log(target_dir, round_num, summary, changed_files, elapsed)
+            if git_repo:
                 git_commit(target_dir, round_num)
                 if diff_stat:
                     cprint(f"  ✓ 本轮改动: {diff_stat}", C.GREEN)
@@ -594,7 +600,6 @@ def run_loop(
             cprint(f"  改动文件: {', '.join(changed_files[:5])}"
                    f"{' ...' if len(changed_files) > 5 else ''}", C.GREEN)
 
-            write_round_log(target_dir, round_num, summary, changed_files, elapsed)
             prev_summary = summary
             consecutive_noops = 0
         else:
