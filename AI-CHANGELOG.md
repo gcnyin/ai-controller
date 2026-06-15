@@ -28,3 +28,13 @@
 
 *耗时 76.1s*
 
+## Round 1 — 2026-06-15 11:16:45
+
+**改动说明**: 修复 call_agent 超时机制的关键缺陷 —— 用 communicate() 替代 for 循环 + wait，确保 Agent 进程挂死时超时能真正生效，防止控制器永久卡住
+
+**改动文件** (2 个):
+- `I-CHANGELOG.md`
+- `ai_controller.py`
+
+*耗时 203.6s*
+

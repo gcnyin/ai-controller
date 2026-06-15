@@ -555,16 +555,25 @@ def run_loop(
 
         print()  # 换行
 
-        if not success:
-            cprint(f"  Agent 返回异常，等待后继续...", C.YELLOW)
-            write_round_log(target_dir, round_num, summary, [], elapsed)
-            time.sleep(sleep_between)
-            continue
-
-        # 检查是否有实际改动
+        # 无论 Agent 是否成功，都先检测文件改动。
+        # Agent 可能在报错前已经修改了文件，这些改动不应被忽略。
         changed_files = get_changed_files(target_dir, before_ts)
         has_diff = bool(changed_files)
 
+        if not success and not has_diff:
+            # Agent 失败且无文件改动 —— 真正的失败，计入无操作次数
+            cprint(f"  Agent 返回异常，等待后继续...", C.YELLOW)
+            write_round_log(target_dir, round_num, summary, [], elapsed)
+            consecutive_noops += 1
+            prev_summary = ""
+            time.sleep(sleep_between)
+            continue
+
+        if not success and has_diff:
+            # Agent 失败但产生了文件改动 —— 部分成功，按正常改动处理
+            cprint(f"  Agent 返回异常但仍有文件改动，继续处理...", C.YELLOW)
+
+        # 以下处理有文件改动或无改动的正常情况
         if has_diff:
             if git_repo:
                 diff_stat = get_git_diff_summary(target_dir)
