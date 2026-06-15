@@ -828,7 +828,10 @@ def call_agent(agent: str, prompt: str, target_dir: str,
         return False, "Agent 执行超时", partial_stdout, elapsed
     except KeyboardInterrupt:
         proc.kill()
-        proc.communicate(timeout=5)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         raise
     except Exception as e:
         elapsed = time.time() - start
