@@ -93,9 +93,7 @@ def call_agent(agent: str, prompt: str, target_dir: str,
     if not quiet:
         print(f"  🚀 执行: {' '.join(shlex.quote(str(p)) for p in cmd_parts[:4])} ...")
     else:
-        # 静默模式只显示简短提示
-        prompt_preview = prompt[:80].replace('\n', ' ')
-        print(f"  🚀 {agent} 工作中... ({prompt_preview}...)")
+        print(f"  🚀 {agent} 工作中...")
 
     start = time.time()
     try:
