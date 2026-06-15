@@ -450,14 +450,20 @@ def is_git_repo(target_dir: str) -> bool:
 
 
 def has_changes(target_dir: str) -> bool:
-    """检查工作区是否有未提交的改动"""
+    """检查工作区是否有未提交的改动（含暂存和未暂存）。
+
+    使用 git status --porcelain 一步检测所有未提交变更：
+    - 未暂存改动（工作区 vs 暂存区）
+    - 已暂存改动（暂存区 vs HEAD）
+    - 未跟踪文件
+    避免 git diff --quiet 只能检测未暂存改动的局限。
+    """
     try:
         r = subprocess.run(
-            ["git", "-C", target_dir, "diff", "--quiet"],
-            capture_output=True, timeout=10,
+            ["git", "-C", target_dir, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
         )
-        # diff --quiet: exit 0 = no changes, exit 1 = has changes
-        return r.returncode != 0
+        return bool(r.stdout.strip())
     except Exception:
         return False
 
