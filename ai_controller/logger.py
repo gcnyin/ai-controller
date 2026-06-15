@@ -3,12 +3,9 @@
 import sys
 import logging
 from pathlib import Path
-from typing import Optional
 
 LOG_FILE = "AI-CHANGELOG.md"
 LOGGER_FILE = "ai-controller.log"
-
-_logger: Optional[logging.Logger] = None
 
 
 class ColoredFormatter(logging.Formatter):
@@ -46,12 +43,14 @@ def setup_logger(target_dir: str) -> logging.Logger:
     控制台 handler：INFO 及以上级别，带 ANSI 颜色。
     文件 handler：DEBUG 及以上级别，无颜色，写入 ai-controller.log。
 
+    setup_logger 只负责配置 handler，不维护模块级全局状态。
+    调用方可通过 logging.getLogger("ai-controller") 或 get_logger() 获取同一实例。
+
     Args:
         target_dir: 目标目录，日志文件将写入该目录下的 ai-controller.log
     Returns:
         配置好的 logger 实例
     """
-    global _logger
     logger = logging.getLogger("ai-controller")
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
@@ -72,18 +71,17 @@ def setup_logger(target_dir: str) -> logging.Logger:
     ))
     logger.addHandler(fh)
 
-    _logger = logger
     return logger
 
 
 def get_logger() -> logging.Logger:
-    """获取全局 logger（未初始化时返回一个基础 console logger）。"""
-    global _logger
-    if _logger is not None:
-        return _logger
-    # 回退：基础 console logger
+    """按名称获取 logger 实例（logging.getLogger 本身是单例，无需模块级缓存）。
+
+    未初始化时自动配置基础 console handler 作为回退。
+    """
     logger = logging.getLogger("ai-controller")
     if not logger.handlers:
+        # 回退：基础 console logger
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         logger.addHandler(ch)
