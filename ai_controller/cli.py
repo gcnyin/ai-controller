@@ -433,7 +433,6 @@ def run_loop(
                        run_count=metadata["run_count"],
                        last_run=metadata["last_run"],
                        global_round=metadata["global_round"])
-        logger = logger
         logger.info(f"任务列表已生成: {len(tasks)} 个任务，保存至 {TASK_FILE}")
 
         # 打印全部任务概览
@@ -759,7 +758,6 @@ def main():
     prelim_target = Path(prelim_args.directory).resolve()
     config = load_config(str(prelim_target))
     if config:
-        logger = logger
         log_target = str(prelim_target)
         logger.info(f"已加载配置文件: {', '.join(f'{k}={v}' for k, v in sorted(config.items()))}")
         parser.set_defaults(**config)
