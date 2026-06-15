@@ -778,6 +778,17 @@ def main():
         cprint(f"错误: 目录不存在: {args.directory}", C.RED)
         sys.exit(1)
 
+    # 校验数值参数，在进入主循环前拦截非法输入，避免运行时出现难以理解的错误
+    if args.max_rounds < 0:
+        cprint(f"错误: --max-rounds 不能为负数（0=无限），当前值: {args.max_rounds}", C.RED)
+        sys.exit(1)
+    if args.timeout <= 0:
+        cprint(f"错误: --timeout 必须为正数，当前值: {args.timeout}", C.RED)
+        sys.exit(1)
+    if args.sleep < 0:
+        cprint(f"错误: --sleep 不能为负数，当前值: {args.sleep}", C.RED)
+        sys.exit(1)
+
     # 检查 agent 是否可用
     agent_cmd = AGENTS[args.agent]["cmd"]
     if shutil.which(agent_cmd) is None:
