@@ -529,17 +529,18 @@ def extract_model_hint(agent_args: Optional[list]) -> str:
         return ""
     # 迭代查找 --model / -m，取最后出现的值
     hint = ""
-    i = 0
-    while i < len(agent_args):
-        arg = agent_args[i]
+    skip_next = False
+    for i, arg in enumerate(agent_args):
+        if skip_next:
+            skip_next = False
+            continue
         if arg in ("--model", "-m") and i + 1 < len(agent_args):
             hint = agent_args[i + 1]
-            i += 2
+            skip_next = True
             continue
         # 处理 --model=xxx 写法
         if arg.startswith("--model=") or arg.startswith("-m="):
             hint = arg.split("=", 1)[1]
-        i += 1
     return hint
 
 
