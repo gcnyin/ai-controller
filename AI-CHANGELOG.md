@@ -58,3 +58,23 @@
 
 *耗时 130.3s*
 
+## Round 2 — 2026-06-15 11:25:02
+
+**改动说明**: 修复 changelog 写入晚于 git commit 导致每轮记录缺失、最后一轮记录丢失的 bug，将 write_round_log 提前到 git_commit 之前执行
+
+**改动文件** (2 个):
+- `I-CHANGELOG.md`
+- `ai_controller.py`
+
+*耗时 147.7s*
+
+## Round 1 — 2026-06-15 11:28:53
+
+**改动说明**: 修复 build_round_prompt 未注入 prev_summary 导致多轮迭代缺乏历史上下文的 bug，使上一轮改动说明真正传递到下一轮 prompt 中
+
+**改动文件** (2 个):
+- `I-CHANGELOG.md`
+- `ai_controller.py`
+
+*耗时 62.5s*
+
