@@ -11,6 +11,7 @@
 
 import os
 import json
+import subprocess
 import time
 import textwrap
 from pathlib import Path
@@ -1157,3 +1158,175 @@ class TestConsecutiveNoopsIsolation:
         assert marked_done_ids == [2], (
             f"只应跳过任务 #2(连续 3 次失败后), 实际标记: {marked_done_ids}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# validation — run_py_compile, run_pytest, has_tests, run_validation
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestHasTests:
+    """测试 has_tests 检测项目是否包含测试配置。"""
+
+    def test_tests_directory(self, tmp_workspace):
+        (Path(tmp_workspace) / "tests").mkdir()
+        assert ac.has_tests(tmp_workspace) is True
+
+    def test_pytest_ini(self, tmp_workspace):
+        (Path(tmp_workspace) / "pytest.ini").write_text("[pytest]\n")
+        assert ac.has_tests(tmp_workspace) is True
+
+    def test_pyproject_toml_with_pytest(self, tmp_workspace):
+        (Path(tmp_workspace) / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = \"-v\"\n",
+            encoding="utf-8",
+        )
+        assert ac.has_tests(tmp_workspace) is True
+
+    def test_no_tests(self, tmp_workspace):
+        assert ac.has_tests(tmp_workspace) is False
+
+    def test_pyproject_without_pytest(self, tmp_workspace):
+        (Path(tmp_workspace) / "pyproject.toml").write_text(
+            "[build-system]\nrequires = [\"setuptools\"]\n",
+            encoding="utf-8",
+        )
+        assert ac.has_tests(tmp_workspace) is False
+
+
+class TestRunPyCompile:
+    """测试 py_compile 语法检查。"""
+
+    def test_valid_py_file(self, tmp_workspace):
+        pyfile = Path(tmp_workspace) / "test.py"
+        pyfile.write_text("x = 1\n")
+        errors = ac.run_py_compile(tmp_workspace, ["test.py"])
+        assert errors == []
+
+    def test_syntax_error(self, tmp_workspace):
+        pyfile = Path(tmp_workspace) / "bad.py"
+        pyfile.write_text("x = \n")
+        errors = ac.run_py_compile(tmp_workspace, ["bad.py"])
+        assert len(errors) == 1
+        assert errors[0][0] == "bad.py"
+
+    def test_ignores_non_py_files(self, tmp_workspace):
+        (Path(tmp_workspace) / "readme.md").write_text("# hello\n")
+        (Path(tmp_workspace) / "test.py").write_text("x = 1\n")
+        errors = ac.run_py_compile(tmp_workspace, ["readme.md", "test.py"])
+        assert errors == []
+
+    def test_non_existent_file_skipped(self, tmp_workspace):
+        errors = ac.run_py_compile(tmp_workspace, ["nonexistent.py"])
+        assert errors == []
+
+    def test_empty_changed_files(self, tmp_workspace):
+        errors = ac.run_py_compile(tmp_workspace, [])
+        assert errors == []
+
+    def test_multiple_errors(self, tmp_workspace):
+        (Path(tmp_workspace) / "a.py").write_text("x = \n")
+        (Path(tmp_workspace) / "b.py").write_text("def f(:\n")
+        errors = ac.run_py_compile(tmp_workspace, ["a.py", "b.py"])
+        assert len(errors) == 2
+
+
+class TestRunPytest:
+    """测试 pytest 运行（mock subprocess 避免真正执行测试）。"""
+
+    def test_all_tests_pass(self, tmp_workspace):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "3 passed in 0.12s\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.run_pytest(tmp_workspace)
+            assert result["success"] is True
+            assert result["passed"] == 3
+
+    def test_some_tests_fail(self, tmp_workspace):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = "1 failed, 2 passed in 0.15s\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.run_pytest(tmp_workspace)
+            assert result["success"] is False
+            assert result["failed"] == 1
+            assert result["passed"] == 2
+
+    def test_no_tests_found(self, tmp_workspace):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 5
+        mock_proc.stdout = "no tests ran\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.run_pytest(tmp_workspace)
+            assert result["success"] is True  # no tests is not failure
+            assert "未发现任何测试" in result["error"]
+
+    def test_pytest_not_installed(self, tmp_workspace):
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            result = ac.run_pytest(tmp_workspace)
+            assert result["success"] is False
+            assert "pytest 未安装" in result["error"]
+
+    def test_timeout(self, tmp_workspace):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+            cmd=["pytest"], timeout=60,
+        )):
+            result = ac.run_pytest(tmp_workspace)
+            assert result["success"] is False
+            assert "超时" in result["error"]
+
+
+class TestRunValidation:
+    """测试 run_validation 统一入口。"""
+
+    def test_valid_py_file_no_tests(self, tmp_workspace):
+        (Path(tmp_workspace) / "good.py").write_text("x = 1\n")
+        result = ac.run_validation(tmp_workspace, ["good.py"], run_tests=False)
+        assert result["success"] is True
+        assert result["has_tests"] is False
+        assert result["py_compile_errors"] == []
+        assert result["test_result"] is None
+
+    def test_syntax_error_no_tests(self, tmp_workspace):
+        (Path(tmp_workspace) / "bad.py").write_text("x = \n")
+        result = ac.run_validation(tmp_workspace, ["bad.py"], run_tests=False)
+        assert result["success"] is False
+        assert len(result["py_compile_errors"]) == 1
+
+    def test_validation_with_mock_pytest(self, tmp_workspace):
+        """验证整合了 py_compile 和 pytest 的场景。"""
+        (Path(tmp_workspace) / "tests").mkdir()
+        (Path(tmp_workspace) / "good.py").write_text("x = 1\n")
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "3 passed in 0.12s\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.run_validation(tmp_workspace, ["good.py"], run_tests=True)
+            assert result["success"] is True
+            assert result["has_tests"] is True
+            assert result["test_result"]["success"] is True
+
+    def test_validation_fails_on_both(self, tmp_workspace):
+        """语法错误和测试同时失败。"""
+        (Path(tmp_workspace) / "tests").mkdir()
+        (Path(tmp_workspace) / "bad.py").write_text("x = \n")
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = "1 failed, 2 passed in 0.15s\n"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.run_validation(tmp_workspace, ["bad.py"], run_tests=True)
+            assert result["success"] is False
+            assert len(result["py_compile_errors"]) == 1
+            assert result["test_result"]["success"] is False

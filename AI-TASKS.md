@@ -1,28 +1,31 @@
 # AI 任务列表
-生成时间: 2026-06-16 16:33:11
+生成时间: 2026-06-16 18:23:09
 运行次数: 1
-最后运行: 2026-06-16 16:25:30
+最后运行: 2026-06-16 18:18:46
 全局轮次: 1
 
-共 6 个任务
+共 7 个任务
 
 ## 待执行
 
-- [ ] **#2** [high] [修复类] _extract_json_tasks 首正则未启用 DOTALL，多行 JSON 匹配失败
-  tasks.py 第73行，正则 r'```(?:json)?\s*\n(.*?)\n```' 中 (.*?) 未启用 re.DOTALL 标志，无法跨行匹配。当 AI 返回带格式化的多行 JSON 代码块（三行以上的 { ... }）时，第一个模式匹配失败，仅靠第二个 fallback 模式 r'\{[\s\S]*"tasks"[\s\S]*\}' 兜底。但 fallback 模式是裸 JSON 匹配，可能在输出中包含前导文本时匹配到错误位置。应在 re.search() 调用传入 re.DOTALL，或将 (.*?) 改为 ([\s\S]*?)。这直接影响规划阶段的任务列表解析成功率。
+- [ ] **#2** [high] [修复类] git commit 会裹挟用户未提交改动
+  run_loop() 中 has_changes() 只打印警告但继续执行，第一个 git_commit 用 git add -A 会把用户手头未提交的改动混入 AI 的 commit 中（含错误 commit message），可能导致用户丢失对自身改动的追踪。修复方案：检测到未提交改动时自动 git stash push -m 'ai-controller-auto-stash'，执行完后 git stash pop。改 cli.py 的 run_loop()。
 
-- [ ] **#3** [medium] [功能开发类] --dry-run --plan-only 仍调用 Agent 生成任务列表
-  cli.py 第634-645行，--plan-only 分支直接调用 generate_task_list()，未检查 --dry-run 标志。同时设置 --dry-run --plan-only 时，该函数仍会启动 Agent 扫描代码库、消耗 API 配额。预览模式的语义是'不实际修改任何文件、不调用 Agent'，但规划阶段调用 Agent 就违背了这个语义。应在 plan-only 分支中判断 dry_run，若已有 AI-TASKS.md 则直接加载预览，若无则提示用户先运行不带 --dry-run 的 --plan-only。
+- [ ] **#3** [high] [重构类] 拆分 cli.py 中的主循环逻辑
+  cli.py 当前 500+ 行，承担了 CLI 参数解析、日志初始化、单轮执行(_execute_single_round)、主循环(run_loop)、传统循环(_run_legacy_loop)、预览模式(_dry_run_task_loop)等互相独立的多重职责。将 _execute_single_round、run_loop、_run_legacy_loop 提取到 ai_controller/loop.py，把日志函数(init_log, write_round_log, write_run_header)提取到 ai_controller/logger.py。这样每个模块职责清晰，也更容易加集成测试。
 
-- [ ] **#4** [medium] [功能开发类] 缺少 --start-from 参数：无法从指定任务ID恢复
-  当前自动恢复逻辑总是从第一个待执行任务开始（tasks.py 第380行 get_next_pending_task 线性扫描）。如果用户手动完成了前5个任务，或者想跳过前几个不适合当前运行的任务，只能手动编辑 AI-TASKS.md 标记为完成。新增 --start-from <id> 参数，在 run_loop() 中跳过 id 小于指定值的任务，直接处理目标范围内的。这对 20+ 任务的大列表场景是高频需求。
+- [ ] **#4** [medium] [功能开发类] 可扩展的 Agent 注册机制
+  目前 AGENTS 字典硬编码在 agent.py 中，用户想用其他 Agent（如 aider、continue.dev 等）必须修改源代码。改为支持通过配置文件 .ai-controller.toml 注册自定义 Agent：声明 cmd、args、cwd_option。示例：[[agents]] name='aider' cmd='aider' args=['--model', 'gpt-4', '--no-suggest-shell-commands']。改 agent.py 的 AGENTS 常量和 load_config 的 known_params。
 
-- [ ] **#5** [medium] [功能开发类] 缺少 --context 参数：向 Agent 传递额外上下文
-  prompts.py 中 PLAN_PROMPT 和 TASK_PROMPT 完全硬编码，用户无法对规划或执行阶段注入额外指令。例如用户想聚焦安全审计（'重点检查SQL注入和XSS'）或性能优化（'优先优化热路径'），目前只能靠手动编辑 AI-TASKS.md 的每条任务描述。新增 --context 或 --instruction 参数，在规划 prompt 和每条任务 prompt 尾部追加用户上下文，大幅提升工具的定向改进能力。比完全自定义模板（AI-TASKS #4）更轻量且覆盖80%的场景。
+- [ ] **#5** [medium] [功能开发类] 任务执行进度通知机制
+  长时间运行(--max-rounds 0或大任务列表)时用户需要盯着终端才能知道进度。添加 --notify 参数支持三种通知方式：(1) desktop-notify（通过调用系统 notify-send/osascript），(2) webhook（POST JSON 到指定 URL），(3) 写入固定的 .ai-controller-status.json 文件供外部工具读取。这样用户可以离开终端，在任务完成或失败时得到主动通知。改 cli.py 的 run_loop()。
 
-- [ ] **#6** [medium] [修复类] 缺少 --max-retries 每任务重试上限
-  cli.py run_loop() 中，当一个任务 Agent 失败且无改动时，会无限重试同一任务，直到 consecutive_noops >= 3 全局阈值触发。没有针对单个任务的独立重试次数限制。一个困难任务理论上可以吃掉所有3次机会后才被跳过，而如果 consecutive_noops 是全局的（问题#1），还会连累后续任务。新增 --max-retries 参数（默认3），在 run_loop() 中每切换任务时重置计数器。加强调度的可预测性。
+- [ ] **#6** [medium] [功能开发类] 并行执行独立任务
+  当任务列表中有多个无文件依赖关系的独立任务时（如修复不同模块的不相关 bug），当前必须串行执行。如果能让这些任务并行（启动多个 Agent 进程分别修改不同文件），可以在多核机器上显著缩短总执行时间。需要做依赖分析（通过检查任务描述中的文件路径判断是否冲突）和冲突检测（git merge 级别）。价值高但实现复杂，改 cli.py 和 tasks.py。
+
+- [ ] **#7** [low] [测试类] 补充核心编排路径的集成测试
+  现有测试覆盖了所有纯逻辑函数（解析、过滤、文件 I/O），但 _execute_single_round 只在 consecutive_noops 测试中被 mock 间接覆盖，run_loop 的主循环边界条件（如 tasks_per_run 截断、所有 Agent 都失败时回退到 legacy 模式、git commit 失败后继续执行、非 git 备份模式的文件检测）完全没有测试覆盖。这些是最容易出 bug 的编排逻辑。建议用 pytest fixture + mock 的组合补上。
 
 ## 已完成
 
-- [x] **#1** consecutive_noops 是跨任务共享全局计数器 (Round 1, 2026-06-16 16:33)
+- [x] **#1** Agent 改动自动质量验证 (Round 1, 2026-06-16 18:23)

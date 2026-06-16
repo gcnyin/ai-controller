@@ -120,6 +120,8 @@ def load_config(target_dir: str) -> Dict[str, Any]:
         "replan",
         "tasks_per_run",
         "dry_run",
+        "validate",
+        "strict_validation",
     }
 
     config: Dict[str, Any] = {}

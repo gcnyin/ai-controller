@@ -216,6 +216,8 @@ def _execute_single_round(
     summary_prefix: str = "",
     error_label: str = "Agent 返回异常",
     defer_commit: bool = False,
+    validate: bool = True,
+    strict_validation: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑:备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
 
@@ -225,6 +227,8 @@ def _execute_single_round(
     Args:
         summary_prefix: 写入 changelog 时加在 summary 前面的前缀(如 "[任务#1] ")
         error_label: Agent 异常且无改动时的日志描述(如 "跳过任务 #1" 或 "等待后继续...")
+        validate: 是否自动运行质量验证（py_compile + pytest）
+        strict_validation: 验证失败时是否阻止 git commit
 
     Returns:
         dict with keys:
@@ -282,8 +286,46 @@ def _execute_single_round(
         # ── 记录 changelog ──
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
 
+        # ── 质量验证 ──
+        validation_ok = True
+        validation_notes = []
+        if validate and has_diff:
+            vresult = run_validation(target_dir, changed_files)
+            if not vresult["success"]:
+                validation_ok = False
+                # 收集验证警告
+                if vresult["py_compile_errors"]:
+                    for fname, err in vresult["py_compile_errors"]:
+                        note = f"语法错误 - {fname}: {err[:120]}"
+                        validation_notes.append(note)
+                        logger.warning(note)
+                if vresult["test_result"] and not vresult["test_result"]["success"]:
+                    tr = vresult["test_result"]
+                    if tr.get("error"):
+                        note = f"测试错误: {tr['error']}"
+                        validation_notes.append(note)
+                        logger.warning(note)
+                    if tr.get("failed", 0) > 0:
+                        note = f"测试失败: {tr['failed']} 个失败"
+                        validation_notes.append(note)
+                        logger.warning(note)
+                # 在 changelog 追加验证警告
+                log_path = Path(target_dir) / LOG_FILE
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write("> \u26a0\ufe0f **质量验证发现问题:**\n\n")
+                    for note in validation_notes:
+                        f.write(f"> - {note}\n")
+                    f.write("\n")
+                if strict_validation:
+                    logger.warning("质量验证失败，已阻止 git commit（--strict-validation）")
+                else:
+                    logger.warning("质量验证发现问题（使用 --strict-validation 可阻止提交）")
+            else:
+                if vresult["has_tests"]:
+                    logger.info("质量验证通过")
+
         # ── Git 提交 ──        
-        if git_repo and not defer_commit:
+        if git_repo and not defer_commit and (not strict_validation or validation_ok):
             diff_stat = get_git_diff_summary(target_dir)
             git_commit(target_dir, round_num, summary)
             if diff_stat:
@@ -319,10 +361,12 @@ def run_loop(
     replan: bool = False,
     tasks_per_run: int = 0,
     dry_run: bool = False,
+    validate: bool = True,
+    strict_validation: bool = False,
 ):
     print()
     print("╔══════════════════════════════════════════╗")
-    print("║      AI 自迭代控制器 v2.2               ║")
+    print("║      AI 自迭代控制器 v2.3               ║")
     print("╚══════════════════════════════════════════╝")
     print()
     print(f"  目标目录 : {target_dir}")
@@ -340,6 +384,10 @@ def run_loop(
         print(f"  备份     : 跳过(Git 仓库已有版本历史)")
     if is_git_repo(target_dir) and not no_git:
         print(f"  Git      : 自动 commit")
+    if validate:
+        print(f"  验证     : 质量检查({' 强制阻止提交' if strict_validation else ' 仅警告'})")
+    else:
+        print(f"  验证     : 已禁用")
     if no_plan:
         print(f"  模式     : 逐轮模式(无任务列表)")
     if tasks_per_run > 0:
@@ -366,6 +414,8 @@ def run_loop(
             no_backup, no_git, sleep_between, timeout,
             agent_args, keep_backups, ext_filter,
             dry_run=dry_run,
+            validate=validate,
+            strict_validation=strict_validation,
         )
         return
 
@@ -419,6 +469,8 @@ def run_loop(
                 no_backup, no_git, sleep_between, timeout,
                 agent_args, keep_backups, ext_filter,
                 dry_run=dry_run,
+                validate=validate,
+                strict_validation=strict_validation,
             )
             return
 
@@ -522,6 +574,8 @@ def run_loop(
             summary_prefix=f"[任务#{tid}] ",
             error_label=f"跳过任务 #{tid}",
             defer_commit=True,
+            validate=validate,
+            strict_validation=strict_validation,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -567,6 +621,8 @@ def _run_legacy_loop(
     keep_backups: int,
     ext_filter: Optional[str],
     dry_run: bool = False,
+    validate: bool = True,
+    strict_validation: bool = False,
 ):
     """原有的逐轮模式:每轮让 AI 自己选一件事来做。
 
@@ -618,6 +674,8 @@ def _run_legacy_loop(
             no_backup, no_git, timeout, agent_args, ext_filter,
             keep_backups,
             error_label="等待后继续...",
+            validate=validate,
+            strict_validation=strict_validation,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -763,6 +821,14 @@ def main():
                         help="每次运行最多处理 N 个任务后退出,0=不限制 (默认 0)")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式:跳过 Agent 调用和文件修改,只打印每轮要执行的任务描述和命令")
+    parser.add_argument("--validate", action="store_true", default=True,
+                        dest="validate",
+                        help="对改动文件自动运行 py_compile 语法检查和 pytest (默认启用)")
+    parser.add_argument("--no-validate", action="store_false",
+                        dest="validate",
+                        help="跳过质量验证")
+    parser.add_argument("--strict-validation", action="store_true",
+                        help="质量验证失败时阻止 git commit")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -827,7 +893,7 @@ def main():
     if args.plan_only:
         print()
         print("╔══════════════════════════════════════════╗")
-        print("║      AI 自迭代控制器 v2.2 (仅规划)       ║")
+        print("║      AI 自迭代控制器 v2.3 (仅规划)       ║")
         print("╚══════════════════════════════════════════╝")
         print()
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
@@ -864,6 +930,8 @@ def main():
             replan=args.replan,
             tasks_per_run=args.tasks_per_run,
             dry_run=args.dry_run,
+            validate=args.validate,
+            strict_validation=args.strict_validation,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
