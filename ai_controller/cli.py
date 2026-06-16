@@ -6,6 +6,7 @@ import sys
 import time
 import shlex
 import shutil
+import subprocess
 import argparse
 import textwrap
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Optional, Tuple, List
 
 import logging
 
-from . import LOG_FILE, LOGGER_FILE
+from . import LOG_FILE, LOGGER_FILE, run_validation
 from .config import load_config
 from .agent import AGENTS, call_agent, build_agent_command
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
@@ -201,6 +202,75 @@ def write_round_log(
         f.write("\n".join(lines) + "\n")
 
 
+# ─── 交互式审核 ──────────────────────────────────────────────────────
+
+def _interactive_review(target_dir: str) -> str:
+    """在 git commit 之前展示 unified diff 并等待用户确认。
+
+    Returns:
+        'commit' - 用户确认提交
+        'skip'   - 用户拒绝提交,改动保留在工作区
+        'discard' - 用户选择丢弃所有改动(git checkout)
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "diff"],
+            capture_output=True, text=True, timeout=10,
+        )
+        diff_output = r.stdout
+    except Exception as e:
+        logger.warning(f"无法获取 git diff: {e}")
+        return "commit"
+
+    # 如果没有 unstaged diff,尝试 staged diff
+    if not diff_output.strip():
+        try:
+            r = subprocess.run(
+                ["git", "-C", target_dir, "diff", "--cached"],
+                capture_output=True, text=True, timeout=10,
+            )
+            diff_output = r.stdout
+        except Exception:
+            pass
+
+    if not diff_output.strip():
+        logger.info("无可审查的改动(空 diff)")
+        return "commit"
+
+    print(f"\n{'=' * 60}")
+    print("  [Review] AI 生成的改动预览 (git diff)")
+    print(f"{'=' * 60}")
+    print(diff_output)
+    print(f"{'=' * 60}")
+
+    while True:
+        try:
+            response = input("  Commit changes? [y/N/d] (d=discard all): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "skip"
+
+        if response in ("", "n"):
+            print("  [Review] 已跳过提交,改动保留在工作区")
+            return "skip"
+        elif response == "y":
+            print("  [Review] 用户确认,继续提交")
+            return "commit"
+        elif response == "d":
+            print("  [Review] 丢弃所有改动...")
+            try:
+                subprocess.run(
+                    ["git", "-C", target_dir, "checkout", "--", "."],
+                    capture_output=True, timeout=30,
+                )
+                print("  [Review] 已丢弃所有改动")
+            except Exception as e:
+                logger.warning(f"丢弃改动失败: {e}")
+            return "discard"
+        else:
+            print("  请输入 y (确认), n (跳过), 或 d (丢弃)")
+
+
 # ─── 单轮执行 ─────────────────────────────────────────────────────────
 
 def _execute_single_round(
@@ -220,6 +290,7 @@ def _execute_single_round(
     defer_commit: bool = False,
     validate: bool = True,
     strict_validation: bool = False,
+    review: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑:备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
 
@@ -328,12 +399,27 @@ def _execute_single_round(
 
         # ── Git 提交 ──        
         if git_repo and not defer_commit and (not strict_validation or validation_ok):
-            diff_stat = get_git_diff_summary(target_dir)
-            git_commit(target_dir, round_num, summary)
-            if diff_stat:
-                print(f"  ✓ 改动: {diff_stat}")
-            else:
-                print(f"  ✓ 已提交改动")
+            should_commit = True
+            if review and has_diff:
+                decision = _interactive_review(target_dir)
+                if decision == "discard":
+                    changed_files = []
+                    has_diff = False
+                    should_commit = False
+                elif decision == "skip":
+                    should_commit = False
+
+            if should_commit:
+                diff_stat = get_git_diff_summary(target_dir)
+                git_commit(target_dir, round_num, summary)
+                if diff_stat:
+                    print(f"  ✓ 改动: {diff_stat}")
+                else:
+                    print(f"  ✓ 已提交改动")
+            elif review and not has_diff:
+                print(f"  - 改动已丢弃")
+            elif review:
+                print(f"  - 改动保留在工作区(未提交)")
         else:
             print(f"  ✓ 修改了 {len(changed_files)} 个文件")
 
@@ -365,6 +451,7 @@ def run_loop(
     dry_run: bool = False,
     validate: bool = True,
     strict_validation: bool = False,
+    review: bool = False,
 ):
     print()
     print("╔══════════════════════════════════════════╗")
@@ -390,6 +477,8 @@ def run_loop(
         print(f"  验证     : 质量检查({' 强制阻止提交' if strict_validation else ' 仅警告'})")
     else:
         print(f"  验证     : 已禁用")
+    if review:
+        print(f"  审核     : 交互式 diff 审核(y/N/d)")
     if no_plan:
         print(f"  模式     : 逐轮模式(无任务列表)")
     if tasks_per_run > 0:
@@ -424,6 +513,7 @@ def run_loop(
             dry_run=dry_run,
             validate=validate,
             strict_validation=strict_validation,
+            review=review,
         )
         if stashed:
             git_stash_pop(target_dir)
@@ -483,6 +573,7 @@ def run_loop(
                 dry_run=dry_run,
                 validate=validate,
                 strict_validation=strict_validation,
+                review=review,
             )
             if stashed:
                 git_stash_pop(target_dir)
@@ -594,6 +685,7 @@ def run_loop(
             defer_commit=True,
             validate=validate,
             strict_validation=strict_validation,
+            review=review,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -615,7 +707,17 @@ def run_loop(
 
         # Agent 成功或有改动:统一提交(含 AI-TASKS.md 状态更新)
         if git_repo:
-            git_commit(target_dir, round_num, result["summary"])
+            should_commit = True
+            if review and result["has_diff"]:
+                decision = _interactive_review(target_dir)
+                if decision == "discard":
+                    result["has_diff"] = False
+                    result["changed_files"] = []
+                    should_commit = False
+                elif decision == "skip":
+                    should_commit = False
+            if should_commit:
+                git_commit(target_dir, round_num, result["summary"])
 
         print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)
@@ -644,6 +746,7 @@ def _run_legacy_loop(
     dry_run: bool = False,
     validate: bool = True,
     strict_validation: bool = False,
+    review: bool = False,
 ):
     """原有的逐轮模式:每轮让 AI 自己选一件事来做。
 
@@ -697,6 +800,7 @@ def _run_legacy_loop(
             error_label="等待后继续...",
             validate=validate,
             strict_validation=strict_validation,
+            review=review,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -850,6 +954,8 @@ def main():
                         help="跳过质量验证")
     parser.add_argument("--strict-validation", action="store_true",
                         help="质量验证失败时阻止 git commit")
+    parser.add_argument("--review", action="store_true",
+                        help="交互式审核模式: commit 前展示 unified diff 并等待用户确认")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -953,6 +1059,7 @@ def main():
             dry_run=args.dry_run,
             validate=args.validate,
             strict_validation=args.strict_validation,
+            review=args.review,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
