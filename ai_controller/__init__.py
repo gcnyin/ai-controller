@@ -65,6 +65,7 @@ from .cli import (
     run_loop,
     build_ext_filter_arg,
     check_ext_filter,
+    ensure_gitignore,
     extract_model_hint,
     init_log,
     write_run_header,

@@ -32,6 +32,7 @@ from .tasks import (
     backup_task_file,
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
+from .tasks import TASK_FILE
 from .git_ops import (
     is_git_repo,
     has_changes,
@@ -127,6 +128,49 @@ def _setup_logging(target_dir: str):
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─── .gitignore 管理 ────────────────────────────────────────────────
+
+def ensure_gitignore(target_dir: str) -> bool:
+    """确保目标目录的 .gitignore 包含所有 AI 控制器生成的文件/目录路径。
+
+    检查目标目录下的 .gitignore 文件，如果缺少 AI-TASKS.md、
+    AI-CHANGELOG.md、ai-controller.log、.ai-controller-backups/ 等路径，
+    自动追加一个带注释标题的段落。
+
+    Returns:
+        True 表示 .gitignore 已被修改，False 表示无需修改。
+    """
+    generated_entries = [
+        TASK_FILE,               # AI-TASKS.md
+        LOG_FILE,                # AI-CHANGELOG.md
+        LOGGER_FILE,             # ai-controller.log
+        BACKUP_DIR_NAME + "/",   # .ai-controller-backups/
+    ]
+
+    gitignore_path = Path(target_dir) / ".gitignore"
+    if not gitignore_path.is_file():
+        return False
+
+    content = gitignore_path.read_text(encoding="utf-8", errors="replace")
+    existing_lines = set(line.strip() for line in content.splitlines())
+
+    missing = [p for p in generated_entries if p not in existing_lines]
+    if not missing:
+        return False
+
+    # 追加缺失条目
+    with open(gitignore_path, "a", encoding="utf-8") as f:
+        f.write("\n# AI 自迭代控制器 生成文件\n")
+        for entry in missing:
+            f.write(entry + "\n")
+
+    logger.info(
+        "已将 %d 个路径自动追加到 .gitignore: %s",
+        len(missing), ", ".join(missing),
+    )
+    return True
 
 
 def init_log(target_dir: str, agent: str, model_hint: str = ""):
@@ -486,6 +530,9 @@ def run_loop(
     if dry_run:
         print(f"  模式     : 预览模式(不实际修改任何文件)")
     print()
+
+    # 自动管理 .gitignore：将生成的文件路径追加到目标仓库的忽略列表
+    ensure_gitignore(target_dir)
 
     ext_filter = build_ext_filter_arg(agent, allowed_ext)
     model_hint = extract_model_hint(agent_args)

@@ -1437,3 +1437,122 @@ class TestGitStashPushPop:
         with patch("subprocess.run", side_effect=OSError("git not found")):
             result = ac.git_stash_pop("/tmp/test")
             assert result is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ensure_gitignore
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestEnsureGitignore:
+    """测试 ensure_gitignore 自动管理目标仓库 .gitignore。"""
+
+    def test_no_gitignore_file(self, tmp_workspace):
+        """目标目录无 .gitignore 文件，跳过，返回 False。"""
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is False
+
+    def test_all_entries_already_present(self, tmp_workspace):
+        ".gitignore 已包含所有生成路径，不修改，返回 False。"""
+        content = (
+            "# Python\n__pycache__/\n"
+            "# AI 自迭代控制器 生成文件\n"
+            "AI-TASKS.md\n"
+            "AI-CHANGELOG.md\n"
+            "ai-controller.log\n"
+            ".ai-controller-backups/\n"
+        )
+        (Path(tmp_workspace) / ".gitignore").write_text(content, encoding="utf-8")
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is False
+
+        # 内容不变
+        after = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert after == content
+
+    def test_missing_all_entries(self, tmp_workspace):
+        ".gitignore 不含任何生成路径，追加全部，返回 True。"""
+        (Path(tmp_workspace) / ".gitignore").write_text(
+            "__pycache__/\n.venv/\n", encoding="utf-8"
+        )
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True
+
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert "# AI 自迭代控制器 生成文件" in content
+        assert "AI-TASKS.md" in content
+        assert "AI-CHANGELOG.md" in content
+        assert "ai-controller.log" in content
+        assert ".ai-controller-backups/" in content
+        # 原有内容仍在
+        assert "__pycache__/" in content
+        assert ".venv/" in content
+
+    def test_missing_some_entries(self, tmp_workspace):
+        """部分路径已存在，只追加缺失的。"""
+        (Path(tmp_workspace) / ".gitignore").write_text(
+            "AI-CHANGELOG.md\nai-controller.log\n", encoding="utf-8"
+        )
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True
+
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        # 缺失的项已追加
+        assert "AI-TASKS.md" in content
+        assert ".ai-controller-backups/" in content
+        # 已有的项未重复
+        lines = content.splitlines()
+        ai_changelog_lines = [l for l in lines if l.strip() == "AI-CHANGELOG.md"]
+        assert len(ai_changelog_lines) == 1
+
+    def test_entries_with_spaces_in_gitignore(self, tmp_workspace):
+        ".gitignore 行带前后空格，匹配仍正常工作。"""
+        (Path(tmp_workspace) / ".gitignore").write_text(
+            "  AI-TASKS.md\n  AI-CHANGELOG.md  \n", encoding="utf-8"
+        )
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert "ai-controller.log" in content
+        assert ".ai-controller-backups/" in content
+
+    def test_empty_gitignore(self, tmp_workspace):
+        """空 .gitignore 追加全部条目。"""
+        (Path(tmp_workspace) / ".gitignore").write_text("", encoding="utf-8")
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True
+
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert "# AI 自迭代控制器 生成文件" in content
+        assert "AI-TASKS.md" in content
+
+    def test_comment_lines_not_confused_as_entries(self, tmp_workspace):
+        """注释行 #AI-TASKS.md 不应被误判为匹配。"""
+        (Path(tmp_workspace) / ".gitignore").write_text(
+            "#AI-TASKS.md is something else\n", encoding="utf-8"
+        )
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True  # 仍需追加真正的条目
+
+    def test_existing_content_preserved(self, tmp_workspace):
+        ".gitignore 原有内容和顺序不受影响。"""
+        original_text = "# Python\n__pycache__/\n*.pyc\n"
+        (Path(tmp_workspace) / ".gitignore").write_text(original_text, encoding="utf-8")
+        ac.ensure_gitignore(tmp_workspace)
+
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert content.startswith(original_text.rstrip("\n"))
+
+    def test_idempotent(self, tmp_workspace):
+        """多次调用不会重复追加。"""
+        (Path(tmp_workspace) / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        ac.ensure_gitignore(tmp_workspace)
+        ac.ensure_gitignore(tmp_workspace)
+        ac.ensure_gitignore(tmp_workspace)
+
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        lines = [l.strip() for l in content.splitlines() if l.strip()]
+        # 每个条目只出现一次
+        assert lines.count("AI-TASKS.md") == 1
+        assert lines.count("AI-CHANGELOG.md") == 1
+        assert lines.count("ai-controller.log") == 1
+        assert lines.count(".ai-controller-backups/") == 1
