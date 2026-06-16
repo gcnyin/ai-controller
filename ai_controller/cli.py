@@ -434,7 +434,18 @@ def _execute_single_round(
                         f.write(f"> - {note}\n")
                     f.write("\n")
                 if strict_validation:
-                    logger.warning("质量验证失败，已阻止 git commit（--strict-validation）")
+                    logger.warning("质量验证失败，自动回滚本轮改动...")
+                    if git_repo:
+                        try:
+                            subprocess.run(
+                                ["git", "-C", target_dir, "checkout", "--", "."],
+                                capture_output=True, timeout=30,
+                            )
+                            changed_files = []
+                            has_diff = False
+                            logger.warning("已自动回滚本轮改动（git checkout -- .）")
+                        except Exception as e:
+                            logger.warning(f"自动回滚失败: {e}")
                 else:
                     logger.warning("质量验证发现问题（使用 --strict-validation 可阻止提交）")
             else:
