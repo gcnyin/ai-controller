@@ -1,8 +1,10 @@
-"""代码质量验证模块 —— 自动对改动文件进行语法检查和测试。
+"""代码质量验证与回滚模块。
 
-提供 `run_validation` 作为统一入口，整合了：
-1. py_compile 语法检查（对改动的 .py 文件逐文件编译）
-2. pytest 测试（如果项目有测试配置则自动运行）
+提供底层工具函数：
+1. run_py_compile — 对改动文件进行语法检查
+2. run_pytest — 运行 pytest 测试
+3. has_tests — 检测项目是否有测试配置
+4. rollback_and_record — 精确回滚本轮改动并记录到 CHANGELOG
 """
 
 import os
@@ -11,6 +13,8 @@ import sys
 import subprocess
 import logging
 from pathlib import Path
+from datetime import datetime
+from typing import Optional
 
 
 logger = logging.getLogger(__name__)
@@ -166,67 +170,178 @@ def run_pytest(target_dir: str, timeout: int = PYTEST_TIMEOUT) -> dict:
         return result
 
 
-# ─── 统一入口 ─────────────────────────────────────────────────────────
+# ─── 运行自定义测试命令 ─────────────────────────────────────────────
 
-def run_validation(
+def run_test_command(
     target_dir: str,
-    changed_files: list[str],
-    run_tests: bool = True,
+    cmd: list[str],
+    timeout: int = 120,
 ) -> dict:
-    """对改动文件执行质量验证。
-
-    流程:
-      1. 对每个改动的 .py 文件执行 py_compile 语法检查
-      2. 如果项目有测试配置且 run_tests=True，运行 pytest
+    """运行任意测试命令并收集结果。
 
     Args:
-        target_dir: 项目根目录
-        changed_files: 本轮改动的文件列表（相对路径）
-        run_tests: 是否尝试运行 pytest
+        target_dir: 项目根目录（作为 cwd）
+        cmd: 命令列表，如 ["npm", "test"]
+        timeout: 超时秒数（默认 120s，比 pytest 更长以适应编译型语言）
 
     Returns:
         dict with keys:
-            success:           bool          — 所有验证项通过
-            has_tests:         bool          — 项目是否存在测试
-            py_compile_errors: list[tuple]   — 语法错误列表
-            test_result:       dict | None   — pytest 结果（None 表示未运行）
+            success:  bool   — 命令是否以 0 退出
+            output:   str    — 合并的 stdout + stderr
+            error:    str    — 异常/超时/未找到时的错误描述
     """
     result: dict = {
-        "success": True,
-        "has_tests": False,
-        "py_compile_errors": [],
-        "test_result": None,
+        "success": False,
+        "output": "",
+        "error": "",
     }
 
-    # 1. py_compile 语法检查
-    py_errors = run_py_compile(target_dir, changed_files)
-    result["py_compile_errors"] = py_errors
-    if py_errors:
-        result["success"] = False
-        logger.warning(
-            f"py_compile 检查发现 {len(py_errors)} 个语法错误: "
-            f"{', '.join(f[0] for f in py_errors[:5])}"
-            f"{' ...' if len(py_errors) > 5 else ''}"
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=target_dir,
+            capture_output=True, text=True, timeout=timeout,
         )
+        output = proc.stdout or ""
+        stderr = proc.stderr or ""
+        result["output"] = output + ("\n" + stderr if stderr else "")
 
-    # 2. pytest 测试
-    if run_tests:
-        result["has_tests"] = has_tests(target_dir)
-        if result["has_tests"]:
-            test_result = run_pytest(target_dir)
-            result["test_result"] = test_result
+        if proc.returncode == 0:
+            result["success"] = True
+        else:
+            result["error"] = f"测试命令退出码 {proc.returncode}"
 
-            if not test_result["success"]:
-                result["success"] = False
-                logger.warning(
-                    f"pytest 未通过: {test_result.get('error', '') or '测试失败'}"
-                )
+        return result
 
-            if test_result.get("passed", 0) > 0:
-                logger.info(f"pytest 通过: {test_result['passed']} 个")
-            if test_result.get("failed", 0) > 0:
-                logger.warning(f"pytest 失败: {test_result['failed']} 个")
-            if test_result.get("error"):
-                logger.warning(f"pytest 错误: {test_result['error']}")
+    except subprocess.TimeoutExpired:
+        result["error"] = f"测试命令超时 ({timeout} 秒)"
+        return result
+    except FileNotFoundError:
+        result["error"] = f"测试命令未找到: {' '.join(cmd)}"
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
 
-    return result
+
+# ─── 精确回滚 + 记录 ─────────────────────────────────────────────────
+
+LOG_FILE = "AI-CHANGELOG.md"
+
+
+def rollback_and_record(
+    target_dir: str,
+    changed_files: list[str],
+    test_command: list[str],
+    test_output: str,
+    round_num: int,
+    summary: str,
+    pre_snapshot: Optional[dict] = None,
+) -> None:
+    """精确回滚本轮改动并记录到 CHANGELOG。
+
+    回滚策略:
+      1. git checkout HEAD -- <modified_files> 恢复已跟踪文件的修改/删除
+      2. 删除本轮新增的已跟踪文件（diff-filter=A）
+      3. 对比改动前快照，删除本轮新增的未跟踪文件
+
+    Args:
+        target_dir: 项目根目录
+        changed_files: 本轮改动文件列表
+        test_command: 测试命令列表
+        test_output: 测试完整输出
+        round_num: 当前轮次
+        summary: 本轮改动说明
+        pre_snapshot: 改动前的文件状态快照，包含:
+            - tracked_files: git ls-files 输出
+            - untracked_files: git ls-files --others --exclude-standard 输出
+            - staged_files: git diff --cached --name-only 输出
+    """
+    target_path = Path(target_dir)
+    git_repo = (target_path / ".git").is_dir()
+
+    if not git_repo:
+        logger.warning("非 git 仓库，无法执行精确回滚")
+        return
+
+    try:
+        # ── 1a. 获取已跟踪文件的修改/删除列表 ──
+        proc_modified = subprocess.run(
+            ["git", "-C", target_dir, "diff", "--name-only", "--diff-filter=MRD", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        modified_files = [f for f in proc_modified.stdout.splitlines() if f.strip()]
+
+        # ── 1b. 获取本轮新增的已跟踪文件 ──
+        proc_added = subprocess.run(
+            ["git", "-C", target_dir, "diff", "--name-only", "--diff-filter=A", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        added_tracked_files = [f for f in proc_added.stdout.splitlines() if f.strip()]
+
+        # ── 1c. 回滚已跟踪文件的修改/删除 ──
+        if modified_files:
+            subprocess.run(
+                ["git", "-C", target_dir, "checkout", "HEAD", "--"] + modified_files,
+                capture_output=True, timeout=30,
+            )
+            logger.info(f"已回滚 {len(modified_files)} 个已跟踪文件的修改")
+
+        # ── 1d. 删除本轮新增的已跟踪文件 ──
+        for f in added_tracked_files:
+            full_path = target_path / f
+            if full_path.exists():
+                full_path.unlink()
+                logger.info(f"已删除新增文件: {f}")
+
+        # ── 1e. 对比快照，删除本轮新增的未跟踪文件 ──
+        if pre_snapshot:
+            before_untracked = set(pre_snapshot.get("untracked_files", []))
+            # 获取当前未跟踪文件
+            proc_current_untracked = subprocess.run(
+                ["git", "-C", target_dir, "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=30,
+            )
+            current_untracked = set(
+                f for f in proc_current_untracked.stdout.splitlines() if f.strip()
+            )
+            # 新增的未跟踪文件 = 当前 - 改动前
+            new_untracked = current_untracked - before_untracked
+            for f in new_untracked:
+                full_path = target_path / f
+                if full_path.exists():
+                    full_path.unlink()
+                    logger.info(f"已删除新增未跟踪文件: {f}")
+
+        # ── 2. 记录到 AI-CHANGELOG.md ──
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cmd_str = " ".join(test_command)
+        # 截断输出到 300 字符
+        output_preview = test_output[:300].rstrip()
+        if len(test_output) > 300:
+            output_preview += "..."
+
+        log_lines = [
+            "",
+            f"> **\u26a0\ufe0f 测试失败，已自动回滚** (Round {round_num} - {ts})",
+            f">",
+            f"> - 改动说明: {summary}",
+            f"> - 测试命令: `{cmd_str}`",
+            f"> - 回滚文件: {len(modified_files) + len(added_tracked_files) + (len(new_untracked) if pre_snapshot else 0)} 个",
+            f"> - 测试输出预览:",
+        ]
+        for line in output_preview.split("\n"):
+            log_lines.append(f">   {line}")
+        log_lines.append("")
+        log_lines.append("")
+
+        log_path = target_path / LOG_FILE
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(log_lines))
+
+        logger.warning(f"测试失败，已自动回滚 {len(modified_files) + len(added_tracked_files)} 个文件")
+        print(f"  \u26a0\ufe0f 测试失败，已自动回滚本轮改动 (Round {round_num})")
+
+    except Exception as e:
+        logger.warning(f"精确回滚失败: {e}")
+        print(f"  \u26a0\ufe0f 回滚失败: {e}")

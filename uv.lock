@@ -3,7 +3,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "ai-controller"
-version = "2.2.0"
+version = "2.3.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

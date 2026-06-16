@@ -16,7 +16,7 @@ from typing import Optional, Tuple, List
 
 import logging
 
-from . import LOG_FILE, LOGGER_FILE, run_validation
+from . import LOG_FILE, LOGGER_FILE, rollback_and_record, detect_test_command, run_test_command
 from .config import load_config
 from .agent import AGENTS, call_agent, build_agent_command
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
@@ -315,6 +315,52 @@ def _interactive_review(target_dir: str) -> str:
             print("  请输入 y (确认), n (跳过), 或 d (丢弃)")
 
 
+# ─── 改动前快照 ────────────────────────────────────────────────────
+
+def _take_pre_snapshot(target_dir: str) -> dict:
+    """在调用 Agent 之前拍摄文件状态快照，用于回滚时精确清理新增文件。
+
+    返回:
+        dict with keys:
+            tracked_files: list[str] — git ls-files 输出
+            untracked_files: list[str] — git ls-files --others --exclude-standard
+            staged_files: list[str] — git diff --cached --name-only
+    """
+    snapshot: dict = {
+        "tracked_files": [],
+        "untracked_files": [],
+        "staged_files": [],
+    }
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "ls-files"],
+            capture_output=True, text=True, timeout=10,
+        )
+        snapshot["tracked_files"] = [f for f in r.stdout.splitlines() if f.strip()]
+    except Exception:
+        pass
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10,
+        )
+        snapshot["untracked_files"] = [f for f in r.stdout.splitlines() if f.strip()]
+    except Exception:
+        pass
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, timeout=10,
+        )
+        snapshot["staged_files"] = [f for f in r.stdout.splitlines() if f.strip()]
+    except Exception:
+        pass
+
+    return snapshot
+
+
 # ─── 单轮执行 ─────────────────────────────────────────────────────────
 
 def _execute_single_round(
@@ -332,8 +378,8 @@ def _execute_single_round(
     summary_prefix: str = "",
     error_label: str = "Agent 返回异常",
     defer_commit: bool = False,
-    validate: bool = True,
-    strict_validation: bool = False,
+    auto_test: bool = True,
+    test_command_override: Optional[str] = None,
     review: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑:备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
@@ -344,8 +390,8 @@ def _execute_single_round(
     Args:
         summary_prefix: 写入 changelog 时加在 summary 前面的前缀(如 "[任务#1] ")
         error_label: Agent 异常且无改动时的日志描述(如 "跳过任务 #1" 或 "等待后继续...")
-        validate: 是否自动运行质量验证（py_compile + pytest）
-        strict_validation: 验证失败时是否阻止 git commit
+        auto_test: 是否自动检测并运行测试命令（失败则精确回滚 + 记录）
+        test_command_override: 手动指定的测试命令，跳过自动检测
 
     Returns:
         dict with keys:
@@ -365,6 +411,11 @@ def _execute_single_round(
         if keep_backups > 0:
             cleanup_old_backups(target_dir, keep_backups)
     before_ts = time.time()
+
+    # ── 改动前快照（用于精确回滚）──
+    pre_snapshot = None
+    if auto_test and git_repo:
+        pre_snapshot = _take_pre_snapshot(target_dir)
 
     # ── 调用 Agent ──
     success, summary, raw_output, elapsed = call_agent(
@@ -403,57 +454,34 @@ def _execute_single_round(
         # ── 记录 changelog ──
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
 
-        # ── 质量验证 ──
-        validation_ok = True
-        validation_notes = []
-        if validate and has_diff:
-            vresult = run_validation(target_dir, changed_files)
-            if not vresult["success"]:
-                validation_ok = False
-                # 收集验证警告
-                if vresult["py_compile_errors"]:
-                    for fname, err in vresult["py_compile_errors"]:
-                        note = f"语法错误 - {fname}: {err[:120]}"
-                        validation_notes.append(note)
-                        logger.warning(note)
-                if vresult["test_result"] and not vresult["test_result"]["success"]:
-                    tr = vresult["test_result"]
-                    if tr.get("error"):
-                        note = f"测试错误: {tr['error']}"
-                        validation_notes.append(note)
-                        logger.warning(note)
-                    if tr.get("failed", 0) > 0:
-                        note = f"测试失败: {tr['failed']} 个失败"
-                        validation_notes.append(note)
-                        logger.warning(note)
-                # 在 changelog 追加验证警告
-                log_path = Path(target_dir) / LOG_FILE
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write("> \u26a0\ufe0f **质量验证发现问题:**\n\n")
-                    for note in validation_notes:
-                        f.write(f"> - {note}\n")
-                    f.write("\n")
-                if strict_validation:
-                    logger.warning("质量验证失败，自动回滚本轮改动...")
-                    if git_repo:
-                        try:
-                            subprocess.run(
-                                ["git", "-C", target_dir, "checkout", "--", "."],
-                                capture_output=True, timeout=30,
-                            )
-                            changed_files = []
-                            has_diff = False
-                            logger.warning("已自动回滚本轮改动（git checkout -- .）")
-                        except Exception as e:
-                            logger.warning(f"自动回滚失败: {e}")
+        # ── 自动测试与回滚 ──
+        if auto_test and has_diff:
+            test_cmd = detect_test_command(target_dir, test_command_override)
+            if test_cmd is not None:
+                print(f"  \u25b6 运行测试: {' '.join(test_cmd)}")
+                test_result = run_test_command(target_dir, test_cmd)
+                if test_result["success"]:
+                    logger.info("测试通过")
+                    print(f"  \u2713 测试通过")
                 else:
-                    logger.warning("质量验证发现问题（使用 --strict-validation 可阻止提交）")
+                    # 测试失败 → 精确回滚 + 记录
+                    logger.warning(f"测试失败: {test_result.get('error', '') or '测试未通过'}")
+                    rollback_and_record(
+                        target_dir=target_dir,
+                        changed_files=changed_files,
+                        test_command=test_cmd,
+                        test_output=test_result["output"],
+                        round_num=round_num,
+                        summary=f"{summary_prefix}{summary}",
+                        pre_snapshot=pre_snapshot,
+                    )
+                    changed_files = []
+                    has_diff = False
             else:
-                if vresult["has_tests"]:
-                    logger.info("质量验证通过")
+                logger.info("未检测到测试框架，跳过测试")
 
         # ── Git 提交 ──        
-        if git_repo and not defer_commit and (not strict_validation or validation_ok):
+        if git_repo and not defer_commit and has_diff:
             should_commit = True
             if review and has_diff:
                 decision = _interactive_review(target_dir)
@@ -504,14 +532,14 @@ def run_loop(
     replan: bool = False,
     tasks_per_run: int = 0,
     dry_run: bool = False,
-    validate: bool = True,
-    strict_validation: bool = False,
+    auto_test: bool = True,
+    test_command: Optional[str] = None,
     review: bool = False,
 ):
     print()
-    print("╔══════════════════════════════════════════╗")
-    print("║      AI 自迭代控制器 v2.3               ║")
-    print("╚══════════════════════════════════════════╝")
+    print("╔═══════════════════════════════════════════════╗")
+    print("║      AI 自迭代控制器 v2.4 (auto-test)        ║")
+    print("╚═══════════════════════════════════════════════╝")
     print()
     print(f"  目标目录 : {target_dir}")
     print(f"  Agent    : {agent}")
@@ -528,10 +556,10 @@ def run_loop(
         print(f"  备份     : 跳过(Git 仓库已有版本历史)")
     if is_git_repo(target_dir) and not no_git:
         print(f"  Git      : 自动 commit")
-    if validate:
-        print(f"  验证     : 质量检查({' 强制阻止提交' if strict_validation else ' 仅警告'})")
+    if auto_test:
+        print(f"  测试     : 自动检测 + 失败回滚")
     else:
-        print(f"  验证     : 已禁用")
+        print(f"  测试     : 已禁用")
     if review:
         print(f"  审核     : 交互式 diff 审核(y/N/d)")
     if no_plan:
@@ -569,8 +597,8 @@ def run_loop(
             no_backup, no_git, sleep_between, timeout,
             agent_args, keep_backups, ext_filter,
             dry_run=dry_run,
-            validate=validate,
-            strict_validation=strict_validation,
+            auto_test=auto_test,
+            test_command_override=test_command,
             review=review,
         )
         if stashed:
@@ -629,8 +657,8 @@ def run_loop(
                 no_backup, no_git, sleep_between, timeout,
                 agent_args, keep_backups, ext_filter,
                 dry_run=dry_run,
-                validate=validate,
-                strict_validation=strict_validation,
+                auto_test=auto_test,
+                test_command_override=test_command,
                 review=review,
             )
             if stashed:
@@ -741,8 +769,8 @@ def run_loop(
             summary_prefix=f"[任务#{tid}] ",
             error_label=f"跳过任务 #{tid}",
             defer_commit=True,
-            validate=validate,
-            strict_validation=strict_validation,
+            auto_test=auto_test,
+            test_command_override=test_command,
             review=review,
         )
 
@@ -802,8 +830,8 @@ def _run_legacy_loop(
     keep_backups: int,
     ext_filter: Optional[str],
     dry_run: bool = False,
-    validate: bool = True,
-    strict_validation: bool = False,
+    auto_test: bool = True,
+    test_command_override: Optional[str] = None,
     review: bool = False,
 ):
     """原有的逐轮模式:每轮让 AI 自己选一件事来做。
@@ -856,8 +884,8 @@ def _run_legacy_loop(
             no_backup, no_git, timeout, agent_args, ext_filter,
             keep_backups,
             error_label="等待后继续...",
-            validate=validate,
-            strict_validation=strict_validation,
+            auto_test=auto_test,
+            test_command_override=test_command_override,
             review=review,
         )
 
@@ -1004,14 +1032,12 @@ def main():
                         help="每次运行最多处理 N 个任务后退出,0=不限制 (默认 0)")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式:跳过 Agent 调用和文件修改,只打印每轮要执行的任务描述和命令")
-    parser.add_argument("--validate", action="store_true", default=True,
-                        dest="validate",
-                        help="对改动文件自动运行 py_compile 语法检查和 pytest (默认启用)")
-    parser.add_argument("--no-validate", action="store_false",
-                        dest="validate",
-                        help="跳过质量验证")
-    parser.add_argument("--strict-validation", action="store_true",
-                        help="质量验证失败时阻止 git commit")
+    parser.add_argument("--auto-test",
+                        action=argparse.BooleanOptionalAction,
+                        default=True, dest="auto_test",
+                        help="自动检测并运行测试命令，失败则精确回滚 (默认启用，使用 --no-auto-test 禁用)")
+    parser.add_argument("--test-command", type=str, default=None,
+                        help="手动指定测试命令，跳过自动检测 (如 'npm test')")
     parser.add_argument("--review", action="store_true",
                         help="交互式审核模式: commit 前展示 unified diff 并等待用户确认")
 
@@ -1078,7 +1104,7 @@ def main():
     if args.plan_only:
         print()
         print("╔══════════════════════════════════════════╗")
-        print("║      AI 自迭代控制器 v2.3 (仅规划)       ║")
+        print("║      AI 自迭代控制器 v2.4 (仅规划)       ║")
         print("╚══════════════════════════════════════════╝")
         print()
         ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
@@ -1115,8 +1141,8 @@ def main():
             replan=args.replan,
             tasks_per_run=args.tasks_per_run,
             dry_run=args.dry_run,
-            validate=args.validate,
-            strict_validation=args.strict_validation,
+            auto_test=args.auto_test,
+            test_command=args.test_command,
             review=args.review,
         )
     except KeyboardInterrupt:

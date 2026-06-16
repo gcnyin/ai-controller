@@ -1195,7 +1195,7 @@ class TestConsecutiveNoopsIsolation:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# validation — run_py_compile, run_pytest, has_tests, run_validation
+# validation — run_py_compile, run_pytest, has_tests, run_test_command
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestHasTests:
@@ -1316,54 +1316,45 @@ class TestRunPytest:
             assert "超时" in result["error"]
 
 
-class TestRunValidation:
-    """测试 run_validation 统一入口。"""
+class TestRunTestCommand:
+    """测试 run_test_command —— 运行任意测试命令。"""
 
-    def test_valid_py_file_no_tests(self, tmp_workspace):
-        (Path(tmp_workspace) / "good.py").write_text("x = 1\n")
-        result = ac.run_validation(tmp_workspace, ["good.py"], run_tests=False)
-        assert result["success"] is True
-        assert result["has_tests"] is False
-        assert result["py_compile_errors"] == []
-        assert result["test_result"] is None
-
-    def test_syntax_error_no_tests(self, tmp_workspace):
-        (Path(tmp_workspace) / "bad.py").write_text("x = \n")
-        result = ac.run_validation(tmp_workspace, ["bad.py"], run_tests=False)
-        assert result["success"] is False
-        assert len(result["py_compile_errors"]) == 1
-
-    def test_validation_with_mock_pytest(self, tmp_workspace):
-        """验证整合了 py_compile 和 pytest 的场景。"""
-        (Path(tmp_workspace) / "tests").mkdir()
-        (Path(tmp_workspace) / "good.py").write_text("x = 1\n")
-
+    def test_success(self, tmp_workspace):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
-        mock_proc.stdout = "3 passed in 0.12s\n"
+        mock_proc.stdout = "All tests passed!\n"
         mock_proc.stderr = ""
 
         with patch("subprocess.run", return_value=mock_proc):
-            result = ac.run_validation(tmp_workspace, ["good.py"], run_tests=True)
+            result = ac.run_test_command(tmp_workspace, ["npm", "test"])
             assert result["success"] is True
-            assert result["has_tests"] is True
-            assert result["test_result"]["success"] is True
+            assert result["error"] == ""
+            assert "All tests passed" in result["output"]
 
-    def test_validation_fails_on_both(self, tmp_workspace):
-        """语法错误和测试同时失败。"""
-        (Path(tmp_workspace) / "tests").mkdir()
-        (Path(tmp_workspace) / "bad.py").write_text("x = \n")
-
+    def test_failure(self, tmp_workspace):
         mock_proc = MagicMock()
         mock_proc.returncode = 1
-        mock_proc.stdout = "1 failed, 2 passed in 0.15s\n"
+        mock_proc.stdout = "FAIL: 1 test failed\n"
         mock_proc.stderr = ""
 
         with patch("subprocess.run", return_value=mock_proc):
-            result = ac.run_validation(tmp_workspace, ["bad.py"], run_tests=True)
+            result = ac.run_test_command(tmp_workspace, ["pytest"])
             assert result["success"] is False
-            assert len(result["py_compile_errors"]) == 1
-            assert result["test_result"]["success"] is False
+            assert "退出码 1" in result["error"]
+
+    def test_command_not_found(self, tmp_workspace):
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            result = ac.run_test_command(tmp_workspace, ["nonexistent"])
+            assert result["success"] is False
+            assert "命令未找到" in result["error"]
+
+    def test_timeout(self, tmp_workspace):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+            cmd=["test"], timeout=120,
+        )):
+            result = ac.run_test_command(tmp_workspace, ["test"])
+            assert result["success"] is False
+            assert "超时" in result["error"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1559,14 +1550,14 @@ class TestEnsureGitignore:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# _execute_single_round — strict_validation 自动回滚
+# _execute_single_round — auto-test 自动测试与回滚
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestStrictValidationRollback:
-    """测试 strict_validation 验证失败时自动执行 git checkout 回滚。"""
+class TestAutoTestRollback:
+    """测试 auto_test 测试失败时自动执行精确回滚。"""
 
-    def test_strict_validation_triggers_rollback(self, tmp_workspace):
-        """strict_validation=True 且验证失败时，应自动执行 git checkout 并返回无改动状态。"""
+    def test_auto_test_failure_triggers_rollback(self, tmp_workspace):
+        """auto_test=True 且测试失败时，应执行精确回滚并返回无改动状态。"""
         import ai_controller.cli as cli_module
 
         # 创建 git 仓库并提交一个初始文件
@@ -1578,89 +1569,186 @@ class TestStrictValidationRollback:
         subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
 
-        # Agent 修改了文件（引入语法错误）
-        init_file.write_text("x = \n")  # 语法错误
+        # Agent 修改了文件
+        init_file.write_text("x = 2\n")
 
-        # 模拟 call_agent、get_changed_files、run_validation
+        # 模拟关键依赖
         mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
         mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_validation_result = {
+        mock_detect_test = MagicMock(return_value=["python", "-m", "pytest", "-x", "-q"])
+        mock_run_test = MagicMock(return_value={
             "success": False,
-            "has_tests": True,
-            "py_compile_errors": [["main.py", "SyntaxError: invalid syntax"]],
-            "test_result": None,
-        }
-        mock_run_validation = MagicMock(return_value=mock_validation_result)
+            "output": "FAIL: 1 test failed\n",
+            "error": "退出码 1",
+        })
+        mock_rollback = MagicMock()
+        mock_take_snapshot = MagicMock(return_value={
+            "tracked_files": ["main.py"],
+            "untracked_files": [],
+            "staged_files": [],
+        })
 
         with patch.object(cli_module, "call_agent", mock_call_agent):
             with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "run_validation", mock_run_validation):
-                    # 让 subprocess.run 通过真实调用（以便 git checkout -- . 实际执行）
-                    with patch.object(cli_module, "subprocess", wraps=cli_module.subprocess):
-                        result = cli_module._execute_single_round(
-                            target_dir=tmp_workspace,
-                            agent="pi",
-                            round_num=1,
-                            prompt="test prompt",
-                            allowed_ext=None,
-                            no_backup=True,
-                            no_git=False,
-                            timeout=10,
-                            agent_args=None,
-                            ext_filter=None,
-                            keep_backups=0,
-                            validate=True,
-                            strict_validation=True,
-                            defer_commit=False,
-                        )
+                with patch.object(cli_module, "detect_test_command", mock_detect_test):
+                    with patch.object(cli_module, "run_test_command", mock_run_test):
+                        with patch.object(cli_module, "rollback_and_record", mock_rollback):
+                            with patch.object(cli_module, "_take_pre_snapshot", mock_take_snapshot):
+                                result = cli_module._execute_single_round(
+                                    target_dir=tmp_workspace,
+                                    agent="pi",
+                                    round_num=1,
+                                    prompt="test prompt",
+                                    allowed_ext=None,
+                                    no_backup=True,
+                                    no_git=False,
+                                    timeout=10,
+                                    agent_args=None,
+                                    ext_filter=None,
+                                    keep_backups=0,
+                                    auto_test=True,
+                                    defer_commit=False,
+                                )
 
+        # 验证 rollback_and_record 被调用
+        mock_rollback.assert_called_once()
         # 验证返回值反映无改动
-        assert result["has_diff"] is False, f"预期 has_diff=False, 实际: {result}"
-        assert result["changed_files"] == [], f"预期 changed_files=[], 实际: {result}"
+        assert result["has_diff"] is False
+        assert result["changed_files"] == []
 
-        # 验证工作区文件已回滚到原始内容
-        restored_content = init_file.read_text()
-        assert "# original content" in restored_content, f"文件应回滚到原始内容, 实际: {restored_content}"
-
-    def test_strict_validation_without_git_no_crash(self, tmp_workspace):
-        """非 git 目录时 strict_validation 不应崩溃，仅记录警告。"""
+    def test_auto_test_passes_does_not_rollback(self, tmp_workspace):
+        """auto_test 测试通过时不应回滚。"""
         import ai_controller.cli as cli_module
 
-        # 非 git 目录，直接创建文件
-        (Path(tmp_workspace) / "main.py").write_text("x = \n")  # 语法错误
+        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
+        init_file = Path(tmp_workspace) / "main.py"
+        init_file.write_text("# original\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
+        init_file.write_text("x = 2\n")
 
         mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
         mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_validation_result = {
-            "success": False,
-            "has_tests": False,
-            "py_compile_errors": [["main.py", "SyntaxError: invalid syntax"]],
-            "test_result": None,
-        }
-        mock_run_validation = MagicMock(return_value=mock_validation_result)
+        mock_detect_test = MagicMock(return_value=["python", "-m", "pytest"])
+        mock_run_test = MagicMock(return_value={
+            "success": True,
+            "output": "3 passed\n",
+            "error": "",
+        })
+        mock_rollback = MagicMock()
 
         with patch.object(cli_module, "call_agent", mock_call_agent):
             with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "run_validation", mock_run_validation):
-                    # 不应抛出异常
-                    result = cli_module._execute_single_round(
-                        target_dir=tmp_workspace,
-                        agent="pi",
-                        round_num=1,
-                        prompt="test prompt",
-                        allowed_ext=None,
-                        no_backup=True,
-                        no_git=True,
-                        timeout=10,
-                        agent_args=None,
-                        ext_filter=None,
-                        keep_backups=0,
-                        validate=True,
-                        strict_validation=True,
-                        defer_commit=False,
-                    )
+                with patch.object(cli_module, "detect_test_command", mock_detect_test):
+                    with patch.object(cli_module, "run_test_command", mock_run_test):
+                        with patch.object(cli_module, "rollback_and_record", mock_rollback):
+                            with patch.object(cli_module, "_take_pre_snapshot",
+                                             MagicMock(return_value={"tracked_files": [], "untracked_files": [], "staged_files": []})):
+                                result = cli_module._execute_single_round(
+                                    target_dir=tmp_workspace,
+                                    agent="pi",
+                                    round_num=1,
+                                    prompt="test prompt",
+                                    allowed_ext=None,
+                                    no_backup=True,
+                                    no_git=False,
+                                    timeout=10,
+                                    agent_args=None,
+                                    ext_filter=None,
+                                    keep_backups=0,
+                                    auto_test=True,
+                                    defer_commit=False,
+                                )
 
-        # 非 git 目录不会回滚，但不应崩溃
-        # has_diff 仍为 True（因为无法回滚）
-        assert "changed_files" in result
-        assert "has_diff" in result
+        mock_rollback.assert_not_called()
+        assert result["has_diff"] is True
+        assert "main.py" in result["changed_files"]
+
+    def test_no_auto_test_skips_testing(self, tmp_workspace):
+        """auto_test=False 时应跳过所有测试和回滚。"""
+        import ai_controller.cli as cli_module
+
+        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
+        init_file = Path(tmp_workspace) / "main.py"
+        init_file.write_text("# original\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
+        init_file.write_text("x = 2\n")
+
+        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
+        mock_get_changed_files = MagicMock(return_value=["main.py"])
+        mock_detect_test = MagicMock()
+        mock_rollback = MagicMock()
+
+        with patch.object(cli_module, "call_agent", mock_call_agent):
+            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
+                with patch.object(cli_module, "detect_test_command", mock_detect_test):
+                    with patch.object(cli_module, "rollback_and_record", mock_rollback):
+                        with patch.object(cli_module, "_take_pre_snapshot",
+                                         MagicMock(return_value={})):
+                            result = cli_module._execute_single_round(
+                                target_dir=tmp_workspace,
+                                agent="pi",
+                                round_num=1,
+                                prompt="test prompt",
+                                allowed_ext=None,
+                                no_backup=True,
+                                no_git=False,
+                                timeout=10,
+                                agent_args=None,
+                                ext_filter=None,
+                                keep_backups=0,
+                                auto_test=False,
+                                defer_commit=False,
+                            )
+
+        mock_detect_test.assert_not_called()
+        mock_rollback.assert_not_called()
+        assert result["has_diff"] is True
+
+    def test_auto_test_no_test_framework(self, tmp_workspace):
+        """未检测到测试框架时不应回滚，也不应报错。"""
+        import ai_controller.cli as cli_module
+
+        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
+        init_file = Path(tmp_workspace) / "main.py"
+        init_file.write_text("# original\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
+        init_file.write_text("x = 2\n")
+
+        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
+        mock_get_changed_files = MagicMock(return_value=["main.py"])
+        mock_detect_test = MagicMock(return_value=None)
+        mock_rollback = MagicMock()
+
+        with patch.object(cli_module, "call_agent", mock_call_agent):
+            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
+                with patch.object(cli_module, "detect_test_command", mock_detect_test):
+                    with patch.object(cli_module, "rollback_and_record", mock_rollback):
+                        with patch.object(cli_module, "_take_pre_snapshot",
+                                         MagicMock(return_value={})):
+                            result = cli_module._execute_single_round(
+                                target_dir=tmp_workspace,
+                                agent="pi",
+                                round_num=1,
+                                prompt="test prompt",
+                                allowed_ext=None,
+                                no_backup=True,
+                                no_git=False,
+                                timeout=10,
+                                agent_args=None,
+                                ext_filter=None,
+                                keep_backups=0,
+                                auto_test=True,
+                                defer_commit=False,
+                            )
+
+        mock_rollback.assert_not_called()
+        assert result["has_diff"] is True
