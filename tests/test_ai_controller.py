@@ -187,6 +187,40 @@ class TestExtractJsonTasks:
         assert len(result) == 1
         assert result[0]["type"] == "修复类"
 
+    def test_preamble_with_curly_braces(self):
+        """AI 输出中在 JSON 之前有 { 字符（贪婪正则 bug 场景）。"""
+        # 注意 "{project}" 中的花括号 —— 旧版贪婪正则会从第一个 { 匹配到最后一个 }
+        text = '分析 {project} 后，任务如下：{"tasks": [{"id": 1, "title": "修复"}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1, "title": "修复"}]
+
+    def test_nested_braces_in_preamble(self):
+        """AI 输出在 JSON 前有嵌套花括号。"""
+        text = 'looks like {something {nested}} here is the plan: {"tasks": [{"id": 1}], "summary": "x"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_nested_objects_in_tasks(self):
+        """tasks 内包含嵌套对象（测试栈匹配正确处理嵌套）。"""
+        text = textwrap.dedent("""\
+            规划结果：
+            {
+              "tasks": [
+                {
+                  "id": 1,
+                  "priority": "high",
+                  "type": "功能开发类",
+                  "title": "添加功能",
+                  "description": "描述信息"
+                }
+              ],
+              "summary": "需要改进"
+            }
+        """)
+        result = ac._extract_json_tasks(text)
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # check_ext_filter

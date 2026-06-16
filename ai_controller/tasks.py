@@ -67,19 +67,45 @@ def backup_task_file(target_dir: str):
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:
     """从 agent 输出中提取 JSON 任务列表"""
-    # 尝试匹配 JSON 块（可能被 markdown 包裹）
-    # 匹配 ```json ... ``` 或无标记的 JSON
-    patterns = [
-        r'```(?:json)?\s*\n(.*?)\n```',  # markdown 代码块
-        r'\{[\s\S]*"tasks"[\s\S]*\}',     # 直接 JSON 对象
-    ]
-    for pat in patterns:
-        m = re.search(pat, text)
-        if m:
-            json_str = m.group(1) if m.lastindex else m.group(0)
-            result = _try_parse_json(json_str)
-            if result:
-                return result
+    # 尝试匹配 ```json ... ``` markdown 代码块
+    m = re.search(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL)
+    if m:
+        result = _try_parse_json(m.group(1))
+        if result:
+            return result
+
+    # 直接解析：用栈匹配找到包含 "tasks" 的最外层 JSON 对象
+    # 避免贪婪正则 {[\s\S]*"tasks"[\s\S]*} 从第一个 { 匹配到最后一个 }
+    tasks_idx = text.find('"tasks"')
+    if tasks_idx < 0:
+        return None
+
+    # 从 "tasks" 位置往前遍历所有 {，从最近到最远尝试
+    search_start = tasks_idx
+    while True:
+        start = text.rfind('{', 0, search_start)
+        if start < 0:
+            break
+
+        # 用栈匹配对应的 }
+        depth = 0
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    json_str = text[start:i + 1]
+                    result = _try_parse_json(json_str)
+                    if result:
+                        return result
+                    # 匹配到 } 但解析失败，尝试更早的 {
+                    break
+
+        # 往更早的 { 搜索
+        search_start = start - 1
+
     return None
 
 
