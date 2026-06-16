@@ -43,6 +43,18 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
     tasks = _extract_json_tasks(raw_output)
     if tasks is None:
         logger.warning("无法解析任务列表，将回退到逐轮模式")
+        # ── 打印 AI 原始响应，方便用户排查 ──
+        print()
+        print("=" * 60)
+        print("  [解析失败] AI 返回的原始响应如下:")
+        print("=" * 60)
+        print(raw_output)
+        print("=" * 60)
+        print("  [诊断] 请检查 AI 的返回是否包含合法 JSON（{ \"tasks\": [...] }）")
+        print("  常见问题: JSON 格式错误、包含多余文本、花括号不匹配、尾部逗号等")
+        print("=" * 60)
+        print()
+        logger.debug("AI 原始响应(DEBUG):\n%s", raw_output)
         return None
 
     return tasks
