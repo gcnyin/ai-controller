@@ -39,13 +39,8 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
         logger.warning(f"规划失败: {summary}")
         return None
 
-    # 从输出中提取 JSON
+    # 从输出中提取 JSON（_extract_json_tasks 内置了多层解析策略）
     tasks = _extract_json_tasks(raw_output)
-    if tasks is None:
-        # 尝试把整段输出当 JSON 解析
-        logger.warning("无法从 Agent 输出中提取任务 JSON，尝试直接解析...")
-        tasks = _try_parse_json(raw_output)
-
     if tasks is None:
         logger.warning("无法解析任务列表，将回退到逐轮模式")
         return None
@@ -66,66 +61,152 @@ def backup_task_file(target_dir: str):
 
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:
-    """从 agent 输出中提取 JSON 任务列表"""
-    # 尝试匹配 ```json ... ``` markdown 代码块
-    m = re.search(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL)
-    if m:
-        result = _try_parse_json(m.group(1))
-        if result:
-            return result
+    """从 agent 输出中提取 JSON 任务列表。
 
-    # 直接解析：用栈匹配找到包含 "tasks" 的最外层 JSON 对象
-    # 避免贪婪正则 {[\s\S]*"tasks"[\s\S]*} 从第一个 { 匹配到最后一个 }
-    tasks_idx = text.find('"tasks"')
-    if tasks_idx < 0:
-        return None
+    采用多层策略，按优先级依次尝试：
+    1. 匹配 markdown 代码块（多种格式变体）
+    2. 字符串感知的栈匹配找到外层 JSON 对象
+    3. 直接解析整段文本
+    """
+    # ── 策略 1：匹配 markdown 代码块（多种变体）──
+    code_block_patterns = [
+        r'```(?:json)?\s*\n(.*?)\n```',         # 标准格式，前后有换行
+        r'```(?:json)?\s*\n(.*?)```',             # 无尾部换行
+        r'```(?:json)?(.*?)```',                    # 无换行
+        r'~~~(?:json)?\s*\n(.*?)\n~~~',           # ~ 代码块
+    ]
+    for pat in code_block_patterns:
+        for m in re.finditer(pat, text, re.DOTALL):
+            result = _try_parse_json(m.group(1).strip())
+            if result is not None:
+                return result
 
-    # 从 "tasks" 位置往前遍历所有 {，从最近到最远尝试
-    search_start = tasks_idx
-    while True:
-        start = text.rfind('{', 0, search_start)
-        if start < 0:
-            break
+    # ── 策略 2：字符串感知的栈匹配 ──
+    # 遍历每个 { 位置，用字符串感知方式匹配对应的 }
+    for start_match in re.finditer(r'\{', text):
+        start = start_match.start()
+        json_str = _safe_extract_json_substring(text, start)
+        if json_str is not None and '"tasks"' in json_str:
+            result = _try_parse_json(json_str)
+            if result is not None:
+                return result
 
-        # 用栈匹配对应的 }
-        depth = 0
-        for i in range(start, len(text)):
-            ch = text[i]
-            if ch == '{':
+    # ── 策略 3：直接解析整段文本 ──
+    result = _try_parse_json(text)
+    if result is not None:
+        return result
+
+    return None
+
+
+def _safe_extract_json_substring(text: str, start: int) -> Optional[str]:
+    """从 text[start] 开始，用字符串感知的栈匹配找到匹配的 }。
+
+    正确处理 JSON 字符串内的 {、}、\\ 转义，不会因描述文本中的
+    花括号导致匹配错误。
+    """
+    depth = 0
+    i = start
+    in_string = False
+    escape = False
+
+    while i < len(text):
+        ch = text[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
                 depth += 1
             elif ch == '}':
                 depth -= 1
                 if depth == 0:
-                    json_str = text[start:i + 1]
-                    result = _try_parse_json(json_str)
-                    if result:
-                        return result
-                    # 匹配到 } 但解析失败，尝试更早的 {
-                    break
+                    return text[start:i + 1]
 
-        # 往更早的 { 搜索
-        search_start = start - 1
+        i += 1
 
     return None
 
 
 def _try_parse_json(json_str: str) -> Optional[List[dict]]:
-    """尝试解析 JSON 字符串并提取 tasks 数组"""
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        # 尝试修复常见问题：去掉尾部逗号等
-        try:
-            cleaned = re.sub(r',\s*}', '}', json_str)
-            cleaned = re.sub(r',\s*]', ']', cleaned)
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            return None
+    """尝试解析 JSON 字符串并提取 tasks 数组。
 
-    if isinstance(data, dict) and "tasks" in data:
-        return data["tasks"]
-    if isinstance(data, list):
-        return data
+    逐步清理策略：
+    1. 直接 json.loads
+    2. 去掉尾部逗号
+    3. 去掉注释（// 和 /* */）
+    4. 去掉所有非 JSON 前后文文本
+    """
+    # 策略 0：如果本身已经是纯 JSON，直接解析
+    data = _json_loads_clean(json_str)
+    if data is not None:
+        if isinstance(data, dict) and "tasks" in data:
+            return data["tasks"]
+        if isinstance(data, list):
+            return data
+
+    # 策略 1：去掉尾部逗号
+    cleaned = re.sub(r',\s*}', '}', json_str)
+    cleaned = re.sub(r',\s*]', ']', cleaned)
+    data = _json_loads_clean(cleaned)
+    if data is not None:
+        if isinstance(data, dict) and "tasks" in data:
+            return data["tasks"]
+        if isinstance(data, list):
+            return data
+
+    return None
+
+
+def _json_loads_clean(s: str) -> Any:
+    """尝试多种清理策略后解析 JSON。"""
+    # 直接尝试
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试去掉注释（某些 AI 会加 // 注释）
+    try:
+        no_comments = re.sub(
+            r'(?:^|[^:\\"\w])\/\/[^\n]*', '', s, flags=re.MULTILINE
+        )
+        return json.loads(no_comments)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试去掉尾部逗号
+    try:
+        cleaned = re.sub(r',\s*}', '}', s)
+        cleaned = re.sub(r',\s*]', ']', cleaned)
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试去掉 JSON 前后的非 JSON 文本
+    try:
+        first_brace = s.find('{')
+        last_brace = s.rfind('}')
+        if first_brace >= 0 and last_brace > first_brace:
+            trimmed = s[first_brace:last_brace + 1]
+            return json.loads(trimmed)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试修复控制字符问题
+    try:
+        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', s)
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
     return None
 
 

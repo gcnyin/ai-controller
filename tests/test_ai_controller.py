@@ -1752,3 +1752,236 @@ class TestAutoTestRollback:
 
         mock_rollback.assert_not_called()
         assert result["has_diff"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _json_loads_clean — JSON 多层清理策略
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestJsonLoadsClean:
+    """测试 _json_loads_clean 的多层清理策略。"""
+
+    def test_direct_valid_json(self):
+        """直接有效的 JSON。"""
+        result = ac._json_loads_clean('{"tasks": [{"id": 1}]}')
+        assert result == {"tasks": [{"id": 1}]}
+
+    def test_trailing_comma_in_object(self):
+        """尾部逗号在对象中。"""
+        result = ac._json_loads_clean('{"tasks": [{"id": 1}],}')
+        assert result == {"tasks": [{"id": 1}]}
+
+    def test_trailing_comma_in_array(self):
+        """尾部逗号在数组中。"""
+        result = ac._json_loads_clean('{"tasks": [{"id": 1},]}')
+        assert result == {"tasks": [{"id": 1}]}
+
+    def test_single_line_comments(self):
+        """JSON 中包含 // 注释应被移除。"""
+        result = ac._json_loads_clean(
+            '{"tasks": [{"id": 1}], "summary": "ok"} // 这是注释'
+        )
+        assert result is not None
+        assert "tasks" in result
+
+    def test_trim_to_outer_braces(self):
+        """取第一个 { 到最后一个 } 之间的内容解析。"""
+        text = '这是前置文字 {"tasks": [{"id": 1}], "summary": "ok"} 这是后置文字'
+        result = ac._json_loads_clean(text)
+        assert result is not None
+        assert result["tasks"] == [{"id": 1}]
+
+    def test_control_characters_removed(self):
+        """JSON 中包含控制字符（如 \\x00）应被移除。"""
+        text = '{"tasks": [{"id": 1}]}\x00\x1f'
+        result = ac._json_loads_clean(text)
+        assert result is not None
+        assert result["tasks"] == [{"id": 1}]
+
+    def test_completely_invalid_returns_none(self):
+        """完全无法解析时返回 None。"""
+        result = ac._json_loads_clean('这不是 JSON {{{{')
+        assert result is None
+
+    def test_trim_no_braces(self):
+        """无花括号时返回 None。"""
+        result = ac._json_loads_clean('纯文本，无大括号')
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _safe_extract_json_substring — 字符串感知的栈匹配
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSafeExtractJsonSubstring:
+    """测试字符串感知的大括号匹配。"""
+
+    def test_simple_object(self):
+        """简单对象。"""
+        text = '{"key": "value"}'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == text
+
+    def test_string_with_braces(self):
+        """字符串中含 { } 不干扰匹配。"""
+        text = '{"desc": "需要修改 {user} 和 {count}"}'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == text
+
+    def test_nested_objects(self):
+        """嵌套对象正确匹配。"""
+        text = '{"outer": {"inner": "value"}}'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == text
+
+    def test_escaped_quotes_in_string(self):
+        """字符串中的转义引号不提前关闭字符串。"""
+        text = '{"desc": "他说:\\"你好\\""}'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == text
+
+    def test_start_from_nested_brace(self):
+        """从嵌套的 { 位置开始匹配。"""
+        text = '{"a": {"b": 1}}'
+        # 从位置 8 的 { 开始（"a": 之后）
+        start = text.find('{', text.find('"a"'))
+        assert start == 6
+        result = ac._safe_extract_json_substring(text, start)
+        assert result == '{"b": 1}'
+
+    def test_text_after_json(self):
+        """JSON 后有额外文本。"""
+        text = '{"key": "val"} extra text'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == '{"key": "val"}'
+
+    def test_no_matching_close(self):
+        """无匹配的 } 时返回 None。"""
+        text = '{"key": "val"'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result is None
+
+    def test_single_quote_does_not_end_string(self):
+        """单引号不结束字符串（JSON 用双引号）。"""
+        text = '{"key": "it\'s fine"}'
+        result = ac._safe_extract_json_substring(text, 0)
+        assert result == text
+
+    def test_empty_object(self):
+        """空对象 {}。"""
+        result = ac._safe_extract_json_substring('{}', 0)
+        assert result == '{}'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _extract_json_tasks — 新增场景（补全原有测试未覆盖的边界）
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExtractJsonTasksExtra:
+    """覆盖新修复的场景。"""
+
+    def test_braces_in_description_string(self):
+        """description 中包含花括号 {user} {count}（字符串内）。"""
+        text = '先扫描代码库...\n{"tasks": [{"id": 1, "description": "修改 {user} 变量"}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result is not None
+        assert result[0]["description"] == "修改 {user} 变量"
+
+    def test_tilde_code_block(self):
+        """~~~ 代码块。"""
+        text = '结果：\n~~~json\n{"tasks": [{"id": 1, "title": "修复"}]}\n~~~'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1, "title": "修复"}]
+
+    def test_no_newline_before_closing_fence(self):
+        """代码块无尾部换行就闭合。"""
+        text = '```json\n{"tasks": [{"id": 1}]}```'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_no_newline_before_or_after_fence(self):
+        """代码块无换行。"""
+        text = '```{"tasks": [{"id": 1}]}```'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_multiple_braces_before_json(self):
+        """JSON 之前有多个花括号（旧版贪婪匹配 bug）。"""
+        text = '{a} {b} {c} {"tasks": [{"id": 1}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_deeply_nested_json(self):
+        """深层嵌套的 JSON。"""
+        text = '{"tasks": [{"id": 1, "meta": {"level": {"value": 3}}}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1, "meta": {"level": {"value": 3}}}]
+
+    def test_escaped_backslash_in_string(self):
+        """字符串中的转义反斜杠。"""
+        text = '{"tasks": [{"id": 1, "path": "C:\\\\dir\\\\file"}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1, "path": "C:\\dir\\file"}]
+
+    def test_mixed_code_block_variants(self):
+        """多种代码块形式在同一个文本中（取第一个有效的）。"""
+        text = '```\n{"tasks": [{"id": 1}]}\n``` 然后 ~~~\n{"tasks": [{"id": 2}]}\n~~~'
+        result = ac._extract_json_tasks(text)
+        # 应匹配第一个 ``` 代码块
+        assert result == [{"id": 1}]
+
+    def test_tasks_array_empty(self):
+        """空 tasks 数组。"""
+        text = '{"tasks": [], "summary": "无任务"}'
+        result = ac._extract_json_tasks(text)
+        assert result == []
+
+    def test_no_tasks_key_only_other_data(self):
+        """JSON 有内容但无 tasks 键。"""
+        text = '{"summary": "仅总结", "version": 2}'
+        result = ac._extract_json_tasks(text)
+        assert result is None
+
+    def test_json_with_trailing_text(self):
+        """JSON 后有额外文字。"""
+        text = '{"tasks": [{"id": 1}], "summary": "ok"} 以上是任务列表。'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_preamble_with_angle_braces(self):
+        """前置文本中有尖括号（非花括号，确保不受影响）。"""
+        text = '<project> <name> 分析结果：{"tasks": [{"id": 1}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+    def test_preamble_with_both_brace_types(self):
+        """前置文本同时有 { 和 } 混合。"""
+        text = '函数签名：fn(a: {i32}) -> {Result} 改进建议：{"tasks": [{"id": 1}], "summary": "ok"}'
+        result = ac._extract_json_tasks(text)
+        assert result == [{"id": 1}]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _try_parse_json — 新增场景
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestTryParseJsonExtra:
+    """补全 _try_parse_json 的场景覆盖。"""
+
+    def test_bare_tasks_array_directly(self):
+        """直接是数组格式。"""
+        text = '[{"id": 1, "title": "修复"}]'
+        result = ac._try_parse_json(text)
+        assert result == [{"id": 1, "title": "修复"}]
+
+    def test_with_extra_text_after_brace_cut(self):
+        """text 中包含 JSON 和多余文本，_json_loads_clean 的裁剪策略可处理。"""
+        text = '其他文字 {"tasks": [{"id": 1}], "summary": "ok"} 后续'
+        result = ac._try_parse_json(text)
+        assert result == [{"id": 1}]
+
+    def test_mixed_brackets_in_text(self):
+        """json 中包含 [] 但也是有效 JSON。"""
+        text = '{"tasks": [{"id": 1, "tags": ["a", "b"]}], "summary": "ok"}'
+        result = ac._try_parse_json(text)
+        assert result == [{"id": 1, "tags": ["a", "b"]}]

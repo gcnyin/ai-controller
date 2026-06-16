@@ -43,6 +43,8 @@ from .tasks import (
     backup_task_file,
     _extract_json_tasks,
     _try_parse_json,
+    _safe_extract_json_substring,
+    _json_loads_clean,
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
 from .validation import (

@@ -19,8 +19,10 @@ PLAN_PROMPT = textwrap.dedent("""\
 
     ## 输出格式
 
-    用以下 JSON 格式输出（不要 markdown 代码块标记，纯 JSON）：
+    你必须严格输出纯 JSON，**不要加任何额外文字**。不要加 markdown 代码块标记（```），不要加解释性文字，不要加问候语。
+    **整个输出必须是一个可以被 json.loads() 直接解析的合法 JSON 对象，不能多任何字符。**
 
+    ```json
     {
       "tasks": [
         {"id": 1, "priority": "high", "type": "功能开发类", "title": "简短标题", "description": "要做什么、改哪个文件、为什么值得做"},
@@ -28,6 +30,7 @@ PLAN_PROMPT = textwrap.dedent("""\
       ],
       "summary": "整体评估总结（中文）"
     }
+    ```
 
     规则：
     - id 从 1 开始递增，按优先级从高到低排列
@@ -37,8 +40,10 @@ PLAN_PROMPT = textwrap.dedent("""\
     - 如果项目已经很完善，tasks 可以给空数组
     - 禁止使用 emoji
     - 使用中文
+    - 不要在 JSON 的字符串值中使用花括号 {}，如果必须使用请用中文括号（）替代
+    - 不要有尾部逗号
 
-    先扫描整个代码库，再给结论。
+    先扫描整个代码库，再给结论。注意：输出中除了纯 JSON 外不能有任何多余字符。
     """).strip()
 
 TASK_PROMPT = textwrap.dedent("""\
