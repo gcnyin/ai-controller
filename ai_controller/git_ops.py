@@ -34,14 +34,17 @@ def has_changes(target_dir: str) -> bool:
         return False
 
 
-def git_commit(target_dir: str, round_num: int):
+def git_commit(target_dir: str, round_num: int, summary: str = ""):
     """自动提交"""
     try:
         subprocess.run(
             ["git", "-C", target_dir, "add", "-A"],
             capture_output=True, timeout=30,
         )
-        msg = f"[AI-Controller] Round {round_num}"
+        if summary:
+            msg = summary
+        else:
+            msg = f"[AI-Controller] Round {round_num}"
         subprocess.run(
             ["git", "-C", target_dir, "commit", "-m", msg, "--allow-empty"],
             capture_output=True, timeout=30,

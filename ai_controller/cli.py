@@ -285,7 +285,7 @@ def _execute_single_round(
         # ── Git 提交 ──        
         if git_repo and not defer_commit:
             diff_stat = get_git_diff_summary(target_dir)
-            git_commit(target_dir, round_num)
+            git_commit(target_dir, round_num, summary)
             if diff_stat:
                 print(f"  ✓ 改动: {diff_stat}")
             else:
@@ -494,7 +494,7 @@ def run_loop(
                            run_count=run_count, last_run=last_run,
                            global_round=round_num)
             if git_repo:
-                git_commit(target_dir, round_num)
+                git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
             consecutive_noops = 0
             tasks_done_this_run += 1
             time.sleep(sleep_between)
@@ -537,7 +537,7 @@ def run_loop(
 
         # Agent 成功或有改动:统一提交(含 AI-TASKS.md 状态更新)
         if git_repo:
-            git_commit(target_dir, round_num)
+            git_commit(target_dir, round_num, result["summary"])
 
         print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)

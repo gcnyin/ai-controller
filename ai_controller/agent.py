@@ -72,7 +72,7 @@ def parse_summary(output: str) -> str:
     if m:
         return m.group(1).strip()
     # 如果没有 SUMMARY 行，尝试用 git diff 的简短描述
-    return "AI 完成了代码改进（未提供具体说明）"
+    return "AI completed code improvements (no specific description provided)"
 
 
 def call_agent(agent: str, prompt: str, target_dir: str,

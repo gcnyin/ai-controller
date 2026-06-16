@@ -58,7 +58,7 @@ TASK_PROMPT = textwrap.dedent("""\
     - 禁止使用 emoji
 
     改动完成后，在输出最后单独一行给出改动总结，格式：
-    SUMMARY: <一句话中文说明你做了什么改动>
+    SUMMARY: <one-sentence English summary of what you changed>
     """).strip()
 
 
