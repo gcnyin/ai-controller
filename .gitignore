@@ -24,3 +24,6 @@ build/
 .DS_Store
 Thumbs.db
 *.bak
+
+# AI 自迭代控制器 生成文件
+AI-TASKS.md
