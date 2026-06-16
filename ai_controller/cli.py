@@ -456,12 +456,18 @@ def run_loop(
     # ─── 阶段 2:逐条执行任务 ───
     round_num = global_round
     consecutive_noops = 0
+    current_task_id = None  # 追踪当前任务,用于跨任务重置计数器
     tasks_done_this_run = 0
     git_repo = is_git_repo(target_dir) and not no_git
 
     while True:
         # 获取下一个待执行任务(从内存缓存查找,避免重复解析文件)
         task = get_next_pending_task(target_dir, tasks)
+
+        # 任务切换时重置连续无改动计数器(每个任务独立计数)
+        if task is not None and task.get("id") != current_task_id:
+            current_task_id = task["id"]
+            consecutive_noops = 0
         if task is None:
             logger.info("所有任务已完成!")
             break

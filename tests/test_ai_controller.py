@@ -1061,3 +1061,99 @@ tasks_per_run = 10
         assert config["keep_backups"] == 3
         assert isinstance(config["tasks_per_run"], int)
         assert config["tasks_per_run"] == 10
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# consecutive_noops 跨任务隔离
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestConsecutiveNoopsIsolation:
+    """验证 consecutive_noops 按任务独立计数，不会跨任务泄漏。
+
+    场景: 任务 #1 连续失败 2 次(consecutive_noops=2)，然后任务 #1
+    因外部原因被标记完成，任务 #2 开始执行。任务 #2 的首次失败不应
+    触发跳过逻辑 —— 每个任务应有独立的重试计数。
+    """
+
+    def test_noops_reset_on_task_switch(self, tmp_workspace, sample_tasks):
+        """任务 ID 变化时 consecutive_noops 应重置为 0。"""
+        import ai_controller.cli as cli_module
+
+        # 仅保留 id=1 和 id=2 两个 pending 任务
+        tasks = [t for t in sample_tasks if t["id"] in (1, 2)]
+        for t in tasks:
+            t["status"] = "pending"
+        task1 = tasks[0]
+        task2 = tasks[1]
+
+        # 预创建任务文件，避免 run_loop 触发 generate_task_list
+        ac.save_task_list(tmp_workspace, tasks)
+
+        # 模拟 get_next_pending_task 的返回序列:
+        #   调用 1-2: 任务 #1 (模拟连续失败 2 次)
+        #   调用 3-6: 任务 #2 (模拟任务 #1 被外部标记完成后的新任务)
+        #     任务 #2 失败 3 次后 consecutive_noops=3,
+        #     第 4 次取任务时触发跳过逻辑
+        #   调用 7: None (全部完成)
+        call_count = [0]
+        task_sequence = [task1, task1, task2, task2, task2, task2, None]
+
+        def mock_get_next_pending_task(target_dir, tasks_list=None):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx >= len(task_sequence):
+                return None
+            return task_sequence[idx]
+
+        # 记录 mark_task_done 被调用的任务 ID
+        marked_done_ids = []
+
+        def mock_mark_task_done(target_dir, task_id, round_num, tasks_list,
+                                run_count=None, last_run=None, global_round=None):
+            marked_done_ids.append(task_id)
+            # 更新任务状态，模拟真实行为
+            ac.mark_task_done(target_dir, task_id, round_num, tasks_list,
+                              run_count=run_count, last_run=last_run,
+                              global_round=global_round)
+
+        # _execute_single_round 始终返回失败+无改动
+        noop_result = {
+            "success": False, "summary": "noop", "changed_files": [],
+            "elapsed": 1.0, "has_diff": False,
+        }
+
+        with patch.object(cli_module, "write_run_header"):
+            with patch.object(cli_module, "init_log"):
+                with patch.object(cli_module, "save_task_list"):
+                    with patch.object(cli_module, "_execute_single_round",
+                                      return_value=noop_result):
+                        with patch.object(cli_module, "is_git_repo",
+                                          return_value=False):
+                            with patch.object(
+                                cli_module, "get_next_pending_task",
+                                side_effect=mock_get_next_pending_task,
+                                autospec=True,
+                            ):
+                                with patch.object(
+                                    cli_module, "mark_task_done",
+                                    side_effect=mock_mark_task_done,
+                                    autospec=True,
+                                ):
+                                    cli_module.run_loop(
+                                        target_dir=tmp_workspace,
+                                        agent="pi",
+                                        max_rounds=10,
+                                        no_backup=True,
+                                        no_git=True,
+                                        sleep_between=0,
+                                        timeout=10,
+                                    )
+
+        # 验证: 任务 #2 被完整重试了 3 次后跳过,
+        # 而非交叉污染导致仅 1 次失败就被跳过
+        # 预期: 任务 #1 失败 2 次(未达阈值), 任务 #2 失败 3 次后跳过
+        # mark_task_done 应只对任务 #2 调用(因为任务 #1 未被标记,
+        # 只通过 continue 重试)
+        assert marked_done_ids == [2], (
+            f"只应跳过任务 #2(连续 3 次失败后), 实际标记: {marked_done_ids}"
+        )

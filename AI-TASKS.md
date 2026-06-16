@@ -1,27 +1,28 @@
 # AI 任务列表
-生成时间: 2026-06-16 16:08:53
+生成时间: 2026-06-16 16:33:11
 运行次数: 1
-最后运行: 2026-06-16 16:08:53
-全局轮次: 0
+最后运行: 2026-06-16 16:25:30
+全局轮次: 1
 
 共 6 个任务
 
 ## 待执行
 
-- [ ] **#1** [high] [功能开发类] Pre/Post 钩子：支持在每轮前后运行自定义命令
-  新增 --pre-hook 和 --post-hook 参数，让用户在每次 agent 执行前/后运行脚本（如 pytest、linter、npm run build）。post-hook 失败时应能中止后续任务。修改 cli.py 的 _execute_single_round() 和 run_loop()，新增 hooks.py 模块封装子进程调用与超时处理。这是项目最关键的缺失能力——目前 agent 改完代码后无任何验证机制，用户无法信任自动迭代的结果，导致工具只能用于实验性项目而非真实工作流。
+- [ ] **#2** [high] [修复类] _extract_json_tasks 首正则未启用 DOTALL，多行 JSON 匹配失败
+  tasks.py 第73行，正则 r'```(?:json)?\s*\n(.*?)\n```' 中 (.*?) 未启用 re.DOTALL 标志，无法跨行匹配。当 AI 返回带格式化的多行 JSON 代码块（三行以上的 { ... }）时，第一个模式匹配失败，仅靠第二个 fallback 模式 r'\{[\s\S]*"tasks"[\s\S]*\}' 兜底。但 fallback 模式是裸 JSON 匹配，可能在输出中包含前导文本时匹配到错误位置。应在 re.search() 调用传入 re.DOTALL，或将 (.*?) 改为 ([\s\S]*?)。这直接影响规划阶段的任务列表解析成功率。
 
-- [ ] **#2** [high] [修复类] 连续无改动时将任务标记为'跳过'而非'完成'
-  当前 run_loop() 中 consecutive_noops >= 3 时调用 mark_task_done() 将任务写入'已完成'区域，但 agent 实际并未完成该任务，这会在统计和人工审查时造成误导。应新增 'skipped' 状态，修改 tasks.py 的 save_task_list()/load_task_list()/mark_task_done() 增加对 skipped 状态的支持，在 AI-TASKS.md 中新增'已跳过'区域并记录跳过原因。cli.py 第 392-398 行的 mark_task_done 调用应改为 mark_task_skipped。
+- [ ] **#3** [medium] [功能开发类] --dry-run --plan-only 仍调用 Agent 生成任务列表
+  cli.py 第634-645行，--plan-only 分支直接调用 generate_task_list()，未检查 --dry-run 标志。同时设置 --dry-run --plan-only 时，该函数仍会启动 Agent 扫描代码库、消耗 API 配额。预览模式的语义是'不实际修改任何文件、不调用 Agent'，但规划阶段调用 Agent 就违背了这个语义。应在 plan-only 分支中判断 dry_run，若已有 AI-TASKS.md 则直接加载预览，若无则提示用户先运行不带 --dry-run 的 --plan-only。
 
-- [ ] **#3** [high] [功能开发类] 按优先级或 ID 选择性执行任务
-  新增 --priority 和 --tasks 参数。--priority high 只执行 high 优先级任务；--tasks 1,3,5 只执行指定 ID 的任务。修改 cli.py 的 run_loop() 在获取下一个待执行任务时增加过滤逻辑，tasks.py 的 get_next_pending_task() 增加 filter 参数。目前 AI 生成 20+ 条任务时，用户只能全量执行或手动编辑 AI-TASKS.md 文件来筛选，效率很低。这是使用频率最高的痛点之一。
+- [ ] **#4** [medium] [功能开发类] 缺少 --start-from 参数：无法从指定任务ID恢复
+  当前自动恢复逻辑总是从第一个待执行任务开始（tasks.py 第380行 get_next_pending_task 线性扫描）。如果用户手动完成了前5个任务，或者想跳过前几个不适合当前运行的任务，只能手动编辑 AI-TASKS.md 标记为完成。新增 --start-from <id> 参数，在 run_loop() 中跳过 id 小于指定值的任务，直接处理目标范围内的。这对 20+ 任务的大列表场景是高频需求。
 
-- [ ] **#4** [medium] [功能开发类] 支持通过配置文件自定义 prompt 模板
-  prompts.py 中 PLAN_PROMPT 和 TASK_PROMPT 硬编码，不同项目类型需要不同关注点（安全审计 vs 性能优化 vs 新功能开发）。在 .ai-controller.toml 中新增 [prompts] 节，允许覆盖 plan 和 task 模板，config.py 的 load_config() 和 known_params 需要相应扩展，cli.py 中将模板参数传递到 generate_task_list() 和 build_task_prompt()。这大幅提升工具的适用范围。
+- [ ] **#5** [medium] [功能开发类] 缺少 --context 参数：向 Agent 传递额外上下文
+  prompts.py 中 PLAN_PROMPT 和 TASK_PROMPT 完全硬编码，用户无法对规划或执行阶段注入额外指令。例如用户想聚焦安全审计（'重点检查SQL注入和XSS'）或性能优化（'优先优化热路径'），目前只能靠手动编辑 AI-TASKS.md 的每条任务描述。新增 --context 或 --instruction 参数，在规划 prompt 和每条任务 prompt 尾部追加用户上下文，大幅提升工具的定向改进能力。比完全自定义模板（AI-TASKS #4）更轻量且覆盖80%的场景。
 
-- [ ] **#5** [medium] [功能开发类] 拆分规划阶段与执行阶段的超时时间
-  当前 --timeout 对规划阶段和每轮任务执行一视同仁。但规划阶段需要扫描全量代码库，通常耗时长得多。新增 --plan-timeout 参数（默认取 --timeout 的 2 倍或 1200 秒），修改 cli.py 的 main() 增加参数，run_loop() 中调用 generate_task_list() 时传入独立的 plan_timeout。避免规划阶段因超时而回退到逐轮模式。
+- [ ] **#6** [medium] [修复类] 缺少 --max-retries 每任务重试上限
+  cli.py run_loop() 中，当一个任务 Agent 失败且无改动时，会无限重试同一任务，直到 consecutive_noops >= 3 全局阈值触发。没有针对单个任务的独立重试次数限制。一个困难任务理论上可以吃掉所有3次机会后才被跳过，而如果 consecutive_noops 是全局的（问题#1），还会连累后续任务。新增 --max-retries 参数（默认3），在 run_loop() 中每切换任务时重置计数器。加强调度的可预测性。
 
-- [ ] **#6** [medium] [重构类] run_loop() 拆分为独立的调度器类
-  cli.py 的 run_loop() 约 150 行，混合了任务调度、模式切换、预览处理、日志输出等职责。应拆分为 TaskScheduler 类（负责任务队列调度、状态管理、退出条件判断），将 _run_legacy_loop 改为 LegacyScheduler，二者共用 _execute_single_round。这不会直接改变用户功能，但后续增加功能（钩子、过滤、并行执行）时不必在此函数中叠加更多 if-else，显著降低维护成本和回归风险。
+## 已完成
+
+- [x] **#1** consecutive_noops 是跨任务共享全局计数器 (Round 1, 2026-06-16 16:33)
