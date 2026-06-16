@@ -54,6 +54,47 @@ def git_commit(target_dir: str, round_num: int, summary: str = ""):
         logger.warning(f"Git 提交失败（Round {round_num}），继续执行")
 
 
+STASH_MESSAGE = "ai-controller-auto-stash"
+
+
+def git_stash_push(target_dir: str) -> bool:
+    """Stash 未提交的改动。返回 True 表示成功创建了 stash。"""
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "stash", "push", "-m", STASH_MESSAGE],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            logger.warning("git stash push 失败: %s", r.stderr.strip())
+            return False
+        # git stash push 在没有改动时也会返回 0,但输出 "No local changes to save"
+        if "No local changes to save" in r.stderr:
+            return False
+        return True
+    except Exception as e:
+        logger.warning("git stash push 异常: %s", e)
+        return False
+
+
+def git_stash_pop(target_dir: str) -> bool:
+    """Pop 最近的 stash。返回 True 表示成功。"""
+    try:
+        r = subprocess.run(
+            ["git", "-C", target_dir, "stash", "pop"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            # stash pop 可能因冲突而失败,此时 stash 列表仍保留,用户可手动处理
+            logger.warning(
+                "git stash pop 失败(可能有冲突),请手动执行 git stash pop 或 git stash drop 恢复。"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.warning("git stash pop 异常: %s", e)
+        return False
+
+
 def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
     """获取本轮改动的文件列表。
 

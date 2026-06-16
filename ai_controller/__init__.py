@@ -54,6 +54,8 @@ from .git_ops import (
     is_git_repo,
     has_changes,
     git_commit,
+    git_stash_push,
+    git_stash_pop,
     get_changed_files,
     get_git_diff_summary,
 )

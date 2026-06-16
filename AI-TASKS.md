@@ -1,15 +1,12 @@
 # AI 任务列表
-生成时间: 2026-06-16 18:23:09
-运行次数: 1
-最后运行: 2026-06-16 18:18:46
-全局轮次: 1
+生成时间: 2026-06-16 18:32:52
+运行次数: 2
+最后运行: 2026-06-16 18:28:50
+全局轮次: 2
 
 共 7 个任务
 
 ## 待执行
-
-- [ ] **#2** [high] [修复类] git commit 会裹挟用户未提交改动
-  run_loop() 中 has_changes() 只打印警告但继续执行，第一个 git_commit 用 git add -A 会把用户手头未提交的改动混入 AI 的 commit 中（含错误 commit message），可能导致用户丢失对自身改动的追踪。修复方案：检测到未提交改动时自动 git stash push -m 'ai-controller-auto-stash'，执行完后 git stash pop。改 cli.py 的 run_loop()。
 
 - [ ] **#3** [high] [重构类] 拆分 cli.py 中的主循环逻辑
   cli.py 当前 500+ 行，承担了 CLI 参数解析、日志初始化、单轮执行(_execute_single_round)、主循环(run_loop)、传统循环(_run_legacy_loop)、预览模式(_dry_run_task_loop)等互相独立的多重职责。将 _execute_single_round、run_loop、_run_legacy_loop 提取到 ai_controller/loop.py，把日志函数(init_log, write_round_log, write_run_header)提取到 ai_controller/logger.py。这样每个模块职责清晰，也更容易加集成测试。
@@ -27,5 +24,7 @@
   现有测试覆盖了所有纯逻辑函数（解析、过滤、文件 I/O），但 _execute_single_round 只在 consecutive_noops 测试中被 mock 间接覆盖，run_loop 的主循环边界条件（如 tasks_per_run 截断、所有 Agent 都失败时回退到 legacy 模式、git commit 失败后继续执行、非 git 备份模式的文件检测）完全没有测试覆盖。这些是最容易出 bug 的编排逻辑。建议用 pytest fixture + mock 的组合补上。
 
 ## 已完成
+
+- [x] **#2** git commit 会裹挟用户未提交改动 (Round 2, 2026-06-16 18:32)
 
 - [x] **#1** Agent 改动自动质量验证 (Round 1, 2026-06-16 18:23)

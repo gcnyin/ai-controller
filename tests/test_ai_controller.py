@@ -1330,3 +1330,76 @@ class TestRunValidation:
             assert result["success"] is False
             assert len(result["py_compile_errors"]) == 1
             assert result["test_result"]["success"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# git_stash_push / git_stash_pop
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestGitStashPushPop:
+    """测试 git stash push/pop 函数（通过 mock subprocess）。"""
+
+    def test_stash_push_success(self):
+        """正常 stash push。"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.git_stash_push("/tmp/test")
+            assert result is True
+
+    def test_stash_push_no_changes(self):
+        """无改动时 stash push 返回 False。"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = "No local changes to save\n"
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.git_stash_push("/tmp/test")
+            assert result is False
+
+    def test_stash_push_failure(self):
+        """stash push 失败返回 False。"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "error: failed to stash"
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.git_stash_push("/tmp/test")
+            assert result is False
+
+    def test_stash_push_exception(self):
+        """subprocess 异常时 stash push 返回 False。"""
+        with patch("subprocess.run", side_effect=OSError("git not found")):
+            result = ac.git_stash_push("/tmp/test")
+            assert result is False
+
+    def test_stash_pop_success(self):
+        """正常 stash pop。"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.git_stash_pop("/tmp/test")
+            assert result is True
+
+    def test_stash_pop_conflict(self):
+        """stash pop 冲突返回 False。"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "CONFLICT in file"
+
+        with patch("subprocess.run", return_value=mock_proc):
+            result = ac.git_stash_pop("/tmp/test")
+            assert result is False
+
+    def test_stash_pop_exception(self):
+        """subprocess 异常时 stash pop 返回 False。"""
+        with patch("subprocess.run", side_effect=OSError("git not found")):
+            result = ac.git_stash_pop("/tmp/test")
+            assert result is False

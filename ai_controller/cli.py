@@ -35,6 +35,8 @@ from .git_ops import (
     is_git_repo,
     has_changes,
     git_commit,
+    git_stash_push,
+    git_stash_pop,
     get_changed_files,
     get_git_diff_summary,
 )
@@ -402,9 +404,15 @@ def run_loop(
     if model_hint:
         print(f"  模型     : {model_hint}")
 
-    # 检查工作区是否有未提交的改动,如有则警告用户
+    # 检查工作区是否有未提交的改动,如有则自动 stash 隔离
+    stashed = False
     if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
-        logger.warning("工作区存在未提交的改动,将与 AI 改动混合记录")
+        logger.info("工作区存在未提交的改动,自动 stash 隔离...")
+        stashed = git_stash_push(target_dir)
+        if stashed:
+            logger.info("已自动 stash 用户改动,执行完成后将自动恢复")
+        else:
+            logger.warning("自动 stash 失败,用户改动可能与 AI 改动混合记录")
 
     # ─── 逐轮模式(--no-plan):保持精简行为 ───
     if no_plan:
@@ -417,6 +425,8 @@ def run_loop(
             validate=validate,
             strict_validation=strict_validation,
         )
+        if stashed:
+            git_stash_pop(target_dir)
         return
 
     # ─── 任务列表模式:自动恢复 + 可选重新规划 ───
@@ -447,6 +457,8 @@ def run_loop(
             )
             if not pending:
                 logger.info("任务列表中所有任务已完成,退出。")
+                if stashed:
+                    git_stash_pop(target_dir)
                 return
         else:
             logger.warning("无法加载任务列表,将重新生成。")
@@ -472,10 +484,14 @@ def run_loop(
                 validate=validate,
                 strict_validation=strict_validation,
             )
+            if stashed:
+                git_stash_pop(target_dir)
             return
 
         if len(tasks) == 0:
             logger.info("AI 评估后认为代码库已完善,无需改进")
+            if stashed:
+                git_stash_pop(target_dir)
             return
 
         # 全新生成:初始化元信息
@@ -503,6 +519,8 @@ def run_loop(
     # ─── 预览模式:打印任务执行计划后退出 ───
     if dry_run:
         _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args)
+        if stashed:
+            git_stash_pop(target_dir)
         return
 
     # ─── 阶段 2:逐条执行任务 ───
@@ -606,6 +624,9 @@ def run_loop(
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
                    global_round=round_num)
+
+    if stashed:
+        git_stash_pop(target_dir)
 
 
 def _run_legacy_loop(
@@ -936,6 +957,11 @@ def main():
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
         logger.warning("用户中断,退出。")
+        # 中断时尽力恢复 stash（如果有的话）
+        try:
+            git_stash_pop(str(target))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
