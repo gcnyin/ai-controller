@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "ai-controller"
@@ -36,8 +36,8 @@ all = ["tomli; python_version < '3.11'", "PyYAML>=6", "pytest>=7"]
 [project.scripts]
 ai-controller = "ai_controller.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["ai_controller*"]
+[tool.hatch.build.targets.wheel]
+packages = ["ai_controller"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

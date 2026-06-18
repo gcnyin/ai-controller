@@ -7,7 +7,7 @@
 确保至少安装了其中一个 Agent：
 
 ```bash
-# pi（你现在用的这个）
+# pi
 npm i -g @earendil-works/pi-coding-agent
 
 # opencode
@@ -20,34 +20,46 @@ npm i -g @anthropic-ai/claude-code
 npm i -g @openai/codex
 ```
 
+## 安装
+
+```bash
+# 克隆仓库
+git clone <repo-url> && cd ai-controller
+
+# 使用 uv 创建虚拟环境并安装
+uv venv --python 3.12
+uv pip install -e ".[all,test]"
+```
+
+安装后通过 `uv run ai-controller` 运行，或激活虚拟环境后直接使用：
+
+```bash
+source .venv/bin/activate
+ai-controller --help
+```
+
 ## 用法
 
 ### 默认模式（先规划再执行）
 
 ```bash
-# pi 跑 10 轮（先让 AI 生成任务列表，再逐条执行）
-python ai_controller.py ./my-project --agent pi --max-rounds 10
+# pi 跑 10 轮（先让 AI 扫描代码库生成任务列表，再逐条执行）
+uv run ai-controller ./my-project --agent pi --max-rounds 10
 
 # opencode 无限循环
-python ai_controller.py ./my-project --agent opencode --max-rounds 0
-
-# claude 只改 Python 文件
-python ai_controller.py ./my-project --agent claude --ext .py --max-rounds 5
+uv run ai-controller ./my-project --agent opencode --max-rounds 0
 
 # 只生成任务列表，不执行（保存到 AI-TASKS.md）
-python ai_controller.py ./my-project --agent pi --plan-only
+uv run ai-controller ./my-project --agent pi --plan-only
 
 # 自动恢复（检测到 AI-TASKS.md 存在时自动从未完成任务继续）
-python ai_controller.py ./my-project --agent pi --max-rounds 10
+uv run ai-controller ./my-project --agent pi --max-rounds 10
 
 # 重新生成任务列表
-python ai_controller.py ./my-project --agent pi --replan
-```
+uv run ai-controller ./my-project --agent pi --replan
 
-### 传统模式（跳过规划，每轮 AI 自行选择）
-
-```bash
-python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
+# 预览模式（打印执行计划，不实际修改文件）
+uv run ai-controller ./my-project --agent pi --dry-run
 ```
 
 ## 参数
@@ -57,20 +69,14 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 | `directory` | 目标代码目录（必填） | - |
 | `--agent` | 选 pi / opencode / claude / codex | pi |
 | `--max-rounds` | 最大轮数，0=无限 | 10 |
-| `--ext` | 只处理指定后缀，逗号分隔 | 全部 |
 | `--timeout` | Agent 单轮超时秒数 | 600 |
 | `--sleep` | 每轮间隔秒数 | 2.0 |
-| `--no-backup` | 不备份 | false |
-| `--no-git` | 不自动 git commit | false |
+| `--no-backup` | 不备份（Git 仓库自动跳过备份） | false |
 | `--agent-args` | 传递给 Agent 的额外参数 | - |
-| `--replan` | 强制重新生成任务列表 | false |
 | `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
-| `--no-plan` | 跳过规划阶段，使用传统逐轮模式 | false |
 | `--plan-only` | 只生成任务列表，不执行 | false |
 | `--replan` | 强制重新生成任务列表（备份旧文件为 .bak） | false |
-| `--tasks-per-run` | 每次运行最多处理 N 个任务后退出（0=不限制） | 0 |
 | `--dry-run` | 预览模式：打印执行计划，不实际修改文件 | false |
-| `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
 
 ## 配置文件
 
@@ -81,13 +87,10 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 # .ai-controller.toml
 agent = "pi"
 max_rounds = 20
-ext = ".py,.ts"
 timeout = 300
 ```
 
 ## 工作流程
-
-### 默认模式（v2.2）
 
 ```
 ┌──────────────────────────────┐
@@ -113,16 +116,6 @@ timeout = 300
 │ │ → 循环                  │   │
 │ └────────────────────────┘   │
 └──────────────────────────────┘
-```
-
-### 传统模式（--no-plan）
-
-```
-┌──────────────────────────┐
-│ 每轮：备份 → AI 自行选择   │
-│ 一个改进点 → 修改文件      │
-│ → 记录日志 → 下一轮        │
-└──────────────────────────┘
 ```
 
 ## 任务列表文件 (AI-TASKS.md)
@@ -156,11 +149,8 @@ timeout = 300
 Ctrl+C 中断后，直接重新运行相同命令即可自动恢复：
 
 ```bash
-# 默认模式：自动检测 AI-TASKS.md，从未完成任务继续执行
-python ai_controller.py ./my-project --agent pi --max-rounds 10
-
-# 传统模式（--no-plan）：每次从第 1 轮重新开始
-python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
+# 自动检测 AI-TASKS.md，从未完成任务继续执行
+uv run ai-controller ./my-project --agent pi --max-rounds 10
 ```
 
 如需重新规划任务列表，使用 `--replan` 参数。
@@ -168,7 +158,7 @@ python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
 ## 退出条件
 
 - 达到 `--max-rounds` 上限
-- 所有任务执行完毕（默认模式）
+- 所有任务执行完毕
 - 连续 3 轮无代码改动
 - Ctrl+C 手动中断
 
