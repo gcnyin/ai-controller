@@ -431,6 +431,7 @@ def run_loop(
     run_count = metadata.get("run_count", 1) + 1 if has_existing_tasks else metadata.get("run_count", 1)
     last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     global_round = metadata.get("global_round", 0)
+    gen_time = metadata.get("gen_time", "")  # 恢复模式保留原始生成时间
     write_run_header(target_dir, run_count)
 
     # ─── 预览模式:打印任务执行计划后退出 ───
@@ -476,7 +477,7 @@ def run_loop(
             )
             mark_task_done(target_dir, task["id"], round_num, tasks,
                            run_count=run_count, last_run=last_run,
-                           global_round=round_num)
+                           global_round=round_num, gen_time=gen_time)
             if git_repo:
                 git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
             consecutive_noops = 0
@@ -508,7 +509,7 @@ def run_loop(
 
         mark_task_done(target_dir, task["id"], round_num, tasks,
                        run_count=run_count, last_run=last_run,
-                       global_round=round_num)
+                       global_round=round_num, gen_time=gen_time)
         consecutive_noops = 0
 
         if git_repo:
@@ -520,7 +521,7 @@ def run_loop(
     # ─── 退出前保存最终状态 ───
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
-                   global_round=round_num)
+                   global_round=round_num, gen_time=gen_time)
 
     if stashed:
         git_stash_pop(target_dir)

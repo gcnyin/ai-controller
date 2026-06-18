@@ -115,17 +115,19 @@ def _extract_json_tasks(text: str) -> Optional[List[dict]]:
 def save_task_list(target_dir: str, tasks: List[dict],
                    run_count: int = 1,
                    last_run: str = "",
-                   global_round: int = 0):
+                   global_round: int = 0,
+                   gen_time: str = ""):
     """将任务列表保存到 AI-TASKS.md。
 
     Args:
         run_count: 已运行次数
         last_run: 最后运行时间字符串（YYYY-MM-DD HH:MM:SS）
         global_round: 全局轮次计数
+        gen_time: 生成时间字符串，为空则使用当前时间
     """
-    gen_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    gen_ts = gen_time if gen_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not last_run:
-        last_run = gen_ts
+        last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
         "# AI 任务列表",
@@ -337,14 +339,15 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
                    tasks: Optional[List[dict]] = None,
                    run_count: int = 1,
                    last_run: str = "",
-                   global_round: int = 0):
+                   global_round: int = 0,
+                   gen_time: str = ""):
     """在任务列表中标记某个任务为已完成。
 
     若提供 tasks，则原地修改内存列表并写回文件（避免重复读取解析）。
     否则回退到从文件加载。
 
     Args:
-        run_count, last_run, global_round: 传递给 save_task_list 的元信息
+        run_count, last_run, global_round, gen_time: 传递给 save_task_list 的元信息
     """
     completed_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -357,7 +360,7 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
                 break
         save_task_list(target_dir, tasks,
                        run_count=run_count, last_run=last_run,
-                       global_round=global_round)
+                       global_round=global_round, gen_time=gen_time)
         return
 
     # 回退：从文件加载
@@ -374,7 +377,7 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
 
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
-                   global_round=global_round)
+                   global_round=global_round, gen_time=gen_time)
 
 
 def get_next_pending_task(target_dir: str,

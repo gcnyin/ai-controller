@@ -977,12 +977,13 @@ class TestConsecutiveNoopsIsolation:
         marked_done_ids = []
 
         def mock_mark_task_done(target_dir, task_id, round_num, tasks_list,
-                                run_count=None, last_run=None, global_round=None):
+                                run_count=None, last_run=None, global_round=None,
+                                gen_time=None):
             marked_done_ids.append(task_id)
             # 更新任务状态，模拟真实行为
             ac.mark_task_done(target_dir, task_id, round_num, tasks_list,
                               run_count=run_count, last_run=last_run,
-                              global_round=global_round)
+                              global_round=global_round, gen_time=gen_time)
 
         # _execute_single_round 始终返回失败+无改动
         noop_result = {
