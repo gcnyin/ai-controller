@@ -15,8 +15,8 @@ import logging
 
 from . import LOG_FILE, LOGGER_FILE
 from .config import load_config
-from .agent import AGENTS, call_agent, build_agent_command
-from .prompts import build_task_prompt
+from .agent import AGENTS, call_agent, build_agent_command, run_test_command
+from .prompts import build_task_prompt, build_retry_prompt
 from .tasks import (
     TASK_FILE,
     generate_task_list,
@@ -296,12 +296,128 @@ def _execute_single_round(
     return {"success": success, "summary": summary, "changed_files": changed_files, "elapsed": elapsed, "has_diff": has_diff}
 
 
+# ─── 带测试重试的任务执行 ─────────────────────────────────────────────
+
+def _execute_task_with_retry(
+    target_dir: str,
+    agent: str,
+    task: dict,
+    task_prompt: str,
+    test_command: Optional[str],
+    max_retries: int,
+    no_backup: bool,
+    timeout: int,
+    agent_args: Optional[list],
+    keep_backups: int,
+    round_num: int,
+    sleep_between: float,
+) -> dict:
+    """执行单个任务，带测试验证和重试。
+
+    流程：
+    1. 调用 Agent 执行任务
+    2. 如果有文件改动且有 test_command，运行测试
+    3. 测试失败则构建修复 prompt，重试（最多 max_retries 次）
+    4. 全部重试用尽仍失败则放弃
+
+    Returns:
+        dict with keys:
+            success: 最终是否通过测试（或无测试命令时等于 agent 是否成功）
+            summary: 最终轮次的改动说明
+            changed_files: 最终轮次的改动文件列表
+            elapsed: 累计耗时（秒）
+            has_diff: 是否有文件改动
+            retries_used: 实际使用的重试次数
+            final_test_passed: 最后的测试是否通过（无测试命令时为 None）
+    """
+    task_id = task.get("id", "?")
+    task_title = task.get("title", "")
+    retries_used = 0
+    total_elapsed = 0.0
+    current_prompt = task_prompt
+    final_test_passed = None
+    summary_prefix = f"[任务#{task_id}] "
+
+    for attempt in range(max_retries + 1):
+        is_retry = attempt > 0
+        if is_retry:
+            print(f"\n  🔄 测试失败，开始第 {attempt}/{max_retries} 次重试...")
+
+        # 调用 Agent 执行（或修复）
+        result = _execute_single_round(
+            target_dir, agent, round_num, current_prompt,
+            no_backup, timeout, agent_args, keep_backups,
+            summary_prefix=summary_prefix,
+            error_label=f"任务 #{task_id} 执行失败",
+            defer_commit=True,  # 始终推迟提交，由外层统一处理
+        )
+        total_elapsed += result["elapsed"]
+
+        # Agent 失败且无改动：直接返回
+        if not result["success"] and not result["has_diff"]:
+            result["elapsed"] = total_elapsed
+            result["retries_used"] = retries_used
+            result["final_test_passed"] = final_test_passed
+            return result
+
+        # 没有测试命令：直接认为通过
+        if not test_command:
+            result["elapsed"] = total_elapsed
+            result["retries_used"] = retries_used
+            result["final_test_passed"] = None
+            return result
+
+        # 有测试命令但无文件改动：跳过测试
+        if not result["has_diff"]:
+            result["elapsed"] = total_elapsed
+            result["retries_used"] = retries_used
+            result["final_test_passed"] = None
+            return result
+
+        # 运行测试
+        test_passed, test_output = run_test_command(
+            test_command, target_dir, timeout,
+        )
+        final_test_passed = test_passed
+
+        if test_passed:
+            result["elapsed"] = total_elapsed
+            result["retries_used"] = retries_used
+            result["final_test_passed"] = True
+            return result
+
+        # 测试失败
+        if attempt < max_retries:
+            retries_used += 1
+            # 还有重试机会，构建修复 prompt
+            current_prompt = build_retry_prompt(
+                task,
+                test_command,
+                test_output,
+                result["changed_files"],
+            )
+            time.sleep(sleep_between)
+        # attempt >= max_retries 时自然退出循环
+
+    # 所有重试用尽
+    logger.warning(
+        f"任务 #{task_id} - {task_title}: "
+        f"测试失败，已用完 {max_retries} 次重试，放弃此任务"
+    )
+    result["elapsed"] = total_elapsed
+    result["retries_used"] = retries_used
+    result["final_test_passed"] = False
+    # 标记为失败但仍返回 has_diff，让外层记录
+    return result
+
+
 # ─── 主循环 ────────────────────────────────────────────────────────────
 
 def run_loop(
     target_dir: str,
     agent: str,
     max_rounds: int = 10,
+    max_retries: int = 3,
     no_backup: bool = False,
     sleep_between: float = 2.0,
     timeout: int = 600,
@@ -390,15 +506,18 @@ def run_loop(
             logger.warning("无法加载任务列表,将重新生成。")
             tasks = None
 
+    test_command = metadata.get("test_command", "") or None
+
     if tasks is None:
         # 全新生成任务列表
         if dry_run and task_file.is_file():
             # 预览模式:如果已存在任务列表文件则直接加载,避免重新调用 Agent
             tasks = load_task_list(target_dir)
             metadata = load_task_metadata(target_dir)
+            test_command = metadata.get("test_command", "") or None
             logger.info("预览模式: 加载已有任务列表,跳过规划阶段 Agent 调用")
         if tasks is None:
-            tasks = generate_task_list(agent, target_dir, timeout, agent_args)
+            tasks, test_command = generate_task_list(agent, target_dir, timeout, agent_args)
         if tasks is None:
             logger.error("任务列表生成失败，退出。")
             if stashed:
@@ -417,7 +536,8 @@ def run_loop(
         save_task_list(target_dir, tasks,
                        run_count=metadata["run_count"],
                        last_run=metadata["last_run"],
-                       global_round=metadata["global_round"])
+                       global_round=metadata["global_round"],
+                       test_command=test_command)
         logger.info(f"任务列表已生成: {len(tasks)} 个任务,保存至 {TASK_FILE}")
 
         # 打印全部任务概览
@@ -434,9 +554,13 @@ def run_loop(
     gen_time = metadata.get("gen_time", "")  # 恢复模式保留原始生成时间
     write_run_header(target_dir, run_count)
 
+    # ─── 显示测试命令 ───
+    if test_command:
+        logger.info(f"测试命令: {test_command}")
+
     # ─── 预览模式:打印任务执行计划后退出 ───
     if dry_run:
-        _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args)
+        _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args, test_command)
         if stashed:
             git_stash_pop(target_dir)
         return
@@ -491,21 +615,31 @@ def run_loop(
         print(f"  第 {round_num} 轮: 执行任务 #{tid} - {title}")
         print(f"{'─' * 55}")
 
-        # 构建任务 prompt 并执行单轮
+        # 构建任务 prompt 并使用带测试重试的执行
         prompt = build_task_prompt(task)
-        result = _execute_single_round(
-            target_dir, agent, round_num, prompt,
-            no_backup, timeout, agent_args, keep_backups,
-            summary_prefix=f"[任务#{tid}] ",
-            error_label=f"跳过任务 #{tid}",
-            defer_commit=True,
+        result = _execute_task_with_retry(
+            target_dir, agent, task, prompt, test_command,
+            max_retries, no_backup, timeout, agent_args, keep_backups,
+            round_num, sleep_between,
         )
 
         if not result["success"] and not result["has_diff"]:
-            # Agent 失败且无改动:重试同一任务
+            # Agent 失败且无改动
             consecutive_noops += 1
             time.sleep(sleep_between)
             continue
+
+        # 记录重试信息
+        retries_used = result.get("retries_used", 0)
+        if retries_used > 0:
+            if result.get("final_test_passed"):
+                logger.info(
+                    f"任务 #{tid} 经过 {retries_used} 次重试后测试通过"
+                )
+            else:
+                logger.warning(
+                    f"任务 #{tid} 测试失败，已用完 {retries_used} 次重试"
+                )
 
         mark_task_done(target_dir, task["id"], round_num, tasks,
                        run_count=run_count, last_run=last_run,
@@ -521,7 +655,8 @@ def run_loop(
     # ─── 退出前保存最终状态 ───
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
-                   global_round=round_num, gen_time=gen_time)
+                   global_round=round_num, gen_time=gen_time,
+                   test_command=test_command)
 
     if stashed:
         git_stash_pop(target_dir)
@@ -568,7 +703,8 @@ def _print_dry_run_round(agent: str, round_num: int, prompt: str,
 
 
 def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
-                       max_rounds: int, agent_args: Optional[list]):
+                       max_rounds: int, agent_args: Optional[list],
+                       test_command: Optional[str] = None):
     """预览模式:遍历任务列表,打印每个待执行任务的详细计划。"""
     pending = [t for t in tasks if t.get("status") != "done"]
     if not pending:
@@ -578,6 +714,10 @@ def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
     print(f"\n{'─' * 55}")
     print(f"  预览模式: 以下 {len(pending)} 个任务将按顺序执行(不会实际修改文件)")
     print(f"{'─' * 55}")
+
+    if test_command:
+        print(f"\n  🧪 测试命令: {test_command}")
+        print(f"     每轮执行后运行此命令验证，失败则自动重试（最多 --max-retries 次）")
 
     round_num = 0
     for task in pending:
@@ -627,6 +767,8 @@ def main():
                         help="使用的 Agent 工具 (默认 pi)")
     parser.add_argument("--max-rounds", type=int, default=10,
                         help="最大迭代轮数,0=无限 (默认 10)")
+    parser.add_argument("--max-retries", type=int, default=3,
+                        help="测试失败时最大重试次数 (默认 3)")
 
     parser.add_argument("--timeout", type=int, default=600,
                         help="Agent 单轮超时秒数 (默认 600)")
@@ -671,6 +813,9 @@ def main():
     if args.max_rounds < 0:
         logger.error(f"--max-rounds 不能为负数(0=无限),当前值: {args.max_rounds}")
         sys.exit(1)
+    if args.max_retries < 0:
+        logger.error(f"--max-retries 不能为负数,当前值: {args.max_retries}")
+        sys.exit(1)
     if args.timeout <= 0:
         logger.error(f"--timeout 必须为正数,当前值: {args.timeout}")
         sys.exit(1)
@@ -704,7 +849,7 @@ def main():
         if args.replan:
             backup_task_file(str(target))
 
-        tasks = generate_task_list(args.agent, str(target), args.timeout, agent_args)
+        tasks, test_command = generate_task_list(args.agent, str(target), args.timeout, agent_args)
         if tasks is None:
             logger.error("规划失败,未能生成任务列表。")
             sys.exit(1)
@@ -712,8 +857,11 @@ def main():
             logger.info("AI 评估后认为代码库已完善,无需改进。")
         else:
             save_task_list(str(target), tasks, run_count=1,
-                           last_run="", global_round=0)
+                           last_run="", global_round=0,
+                           test_command=test_command)
             logger.info(f"任务列表已保存至 {TASK_FILE}(共 {len(tasks)} 个任务)")
+            if test_command:
+                logger.info(f"测试命令: {test_command}")
         sys.exit(0)
 
     try:
@@ -721,6 +869,7 @@ def main():
             target_dir=str(target),
             agent=args.agent,
             max_rounds=args.max_rounds,
+            max_retries=args.max_retries,
             no_backup=args.no_backup,
             sleep_between=args.sleep,
             timeout=args.timeout,

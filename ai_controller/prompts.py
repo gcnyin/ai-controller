@@ -74,7 +74,8 @@ PLAN_PROMPT = textwrap.dedent("""\
         {"id": 2, "priority": "high", "type": "new feature", "title": "short title", "description": "..."},
         {"id": 3, "priority": "medium", "type": "bug fix", "title": "short title", "description": "..."}
       ],
-      "summary": "One-paragraph assessment: current state + how many deletes/adds/fixes suggested + overall verdict"
+      "summary": "One-paragraph assessment: current state + how many deletes/adds/fixes suggested + overall verdict",
+      "test_command": "pytest tests/ -v  # or any single shell command that validates the project"
     }
 
     Rules:
@@ -87,6 +88,15 @@ PLAN_PROMPT = textwrap.dedent("""\
     - No emoji
     - No trailing commas
     - No curly braces {} inside JSON string values — if unavoidable, use parentheses instead
+
+    ### test_command field
+
+    Provide a single shell command that validates the project is still working correctly.
+    - It must return exit code 0 on success, non-zero on failure
+    - Use the project's existing test runner (pytest, cargo test, npm test, go test, etc.)
+    - If the project has no tests at all, return an empty string ""
+    - Chain multiple commands with && if needed: "pytest && npm test"
+    - Do NOT include commands that require interactive input or long-running servers
 
     Scan the whole codebase first, then produce the output. Remember: nothing outside the JSON.
     """).strip()
@@ -144,9 +154,67 @@ TASK_PROMPT = textwrap.dedent("""\
     """).strip()
 
 
+RETRY_PROMPT = textwrap.dedent("""\
+    ## 测试失败，需要修复
+
+    上一轮的任务已执行，但项目测试未通过。请根据以下信息修复问题。
+
+    ### 原始任务
+
+    {task_description}
+
+    ### 本轮修改的文件
+
+    {changed_files}
+
+    ### 测试命令
+
+        {test_command}
+
+    ### 测试失败输出
+
+    {test_output}
+
+    ## Your Role
+
+    You are a pragmatic, efficient senior developer. Fix ONLY the issues that caused the test failure. Do not introduce new features, refactor unrelated code, or broaden the scope.
+
+    ## The Ladder (stop at the first rung that holds)
+
+    1. Does the standard library already do this?
+    2. Does a native platform feature cover it?
+    3. Does an already-installed dependency solve it?
+    4. Can this be one line?
+    5. Only then: the minimum code that works.
+
+    ## Rules
+
+    - Edit files directly — never output suggestions or code blocks for the user to copy-paste
+    - Shortest working diff that fixes the test. But working means correct.
+    - No new dependencies
+    - No unrequested abstractions
+    - No emoji
+
+    Final line: SUMMARY: <one-sentence English summary of what you fixed>
+    """).strip()
+
+
 def build_task_prompt(task: dict) -> str:
     """Build execution prompt for a single task."""
     desc = f"**[{task.get('type', 'improvement')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
     # 转义花括号，防止 AI 生成的描述含 {} 导致 format() 抛 KeyError
     desc = desc.replace('{', '{{').replace('}', '}}')
     return TASK_PROMPT.format(task_description=desc)
+
+
+def build_retry_prompt(task: dict, test_command: str, test_output: str,
+                       changed_files: list[str]) -> str:
+    """Build a retry prompt when tests fail after a task execution."""
+    desc = f"**[{task.get('type', 'improvement')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
+    files_str = "\n".join(f"- `{f}`" for f in changed_files) if changed_files else "(无文件改动)"
+    return RETRY_PROMPT.format(
+        task_description=desc,
+        changed_files=files_str,
+        test_command=test_command,
+        test_output=test_output,
+    )

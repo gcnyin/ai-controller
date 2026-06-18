@@ -41,8 +41,9 @@ class TestExtractJsonTasks:
             ```
             以上是任务列表。
         """)
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1, "title": "修 bug"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1, "title": "修 bug"}]
+        assert tc is None
 
     def test_markdown_code_block_without_tag(self):
         """Markdown 代码块，不带语言标记（仅 ```）。"""
@@ -55,25 +56,29 @@ class TestExtractJsonTasks:
             }
             ```
         """)
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 2, "title": "加测试"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 2, "title": "加测试"}]
+        assert tc is None
 
     def test_bare_json_in_text(self):
         """JSON 直接嵌入文本中，无 markdown 代码块。"""
         text = '好的，这是任务列表 {"tasks": [{"id": 1, "title": "test"}], "summary": "ok"} 谢谢'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1, "title": "test"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1, "title": "test"}]
+        assert tc is None
 
     def test_no_json_found(self):
         """文本中不含任何 JSON 任务列表。"""
-        result = ac._extract_json_tasks("这是一段普通的文字回复")
-        assert result is None
+        tasks, tc = ac._extract_json_tasks("这是一段普通的文字回复")
+        assert tasks is None
+        assert tc is None
 
     def test_json_array_without_tasks_key(self):
         """JSON 是数组但不是通过 tasks 键组织的 —— 直接解析。"""
         text = '{"tasks": [{"id": 5}]}'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 5}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 5}]
+        assert tc is None
 
     def test_first_match_wins_with_multiple_blocks(self):
         """多个 JSON 块时，取第一个有效匹配。"""
@@ -86,8 +91,9 @@ class TestExtractJsonTasks:
             {"tasks": [{"id": 20, "title": "第二个"}]}
             ```
         """)
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 10, "title": "第一个"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 10, "title": "第一个"}]
+        assert tc is None
 
     def test_multiline_json_with_indentation(self):
         """带缩进的多行 JSON。"""
@@ -107,9 +113,10 @@ class TestExtractJsonTasks:
             }
             ```
         """)
-        result = ac._extract_json_tasks(text)
-        assert len(result) == 1
-        assert result[0]["type"] == "修复类"
+        tasks, tc = ac._extract_json_tasks(text)
+        assert len(tasks) == 1
+        assert tasks[0]["type"] == "修复类"
+        assert tc is None
 
 
 
@@ -130,9 +137,31 @@ class TestExtractJsonTasks:
               "summary": "需要改进"
             }
         """)
-        result = ac._extract_json_tasks(text)
-        assert len(result) == 1
-        assert result[0]["id"] == 1
+        tasks, tc = ac._extract_json_tasks(text)
+        assert len(tasks) == 1
+        assert tasks[0]["id"] == 1
+        assert tc is None
+
+    def test_extract_test_command_from_json(self):
+        """从 JSON 中提取 test_command 字段。"""
+        text = '{"tasks": [{"id": 1}], "summary": "ok", "test_command": "pytest tests/ -v"}'
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc == "pytest tests/ -v"
+
+    def test_extract_empty_test_command(self):
+        """test_command 为空字符串时返回 None。"""
+        text = '{"tasks": [{"id": 1}], "summary": "ok", "test_command": ""}'
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
+
+    def test_extract_test_command_not_present(self):
+        """JSON 不含 test_command 字段时返回 None。"""
+        text = '{"tasks": [{"id": 1}], "summary": "ok"}'
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
 
 class TestTaskListIO:
@@ -259,6 +288,26 @@ class TestTaskListIO:
         """无任务文件时返回 None。"""
         task = ac.get_next_pending_task(tmp_workspace)
         assert task is None
+
+    def test_save_and_load_with_test_command(self, tmp_workspace, sample_tasks):
+        """test_command 持久化到 AI-TASKS.md 头部，加载时可恢复。"""
+        ac.save_task_list(tmp_workspace, sample_tasks,
+                          test_command="pytest tests/ -v")
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta["test_command"] == "pytest tests/ -v"
+
+        # 文件内容中应包含测试命令
+        content = (Path(tmp_workspace) / "AI-TASKS.md").read_text(encoding="utf-8")
+        assert "测试命令: pytest tests/ -v" in content
+
+    def test_save_without_test_command(self, tmp_workspace, sample_tasks):
+        """无 test_command 时 AI-TASKS.md 不含测试命令行。"""
+        ac.save_task_list(tmp_workspace, sample_tasks)
+        meta = ac.load_task_metadata(tmp_workspace)
+        assert meta["test_command"] == ""
+
+        content = (Path(tmp_workspace) / "AI-TASKS.md").read_text(encoding="utf-8")
+        assert "测试命令" not in content
 
     def test_done_task_with_timestamp_format(self, tmp_workspace):
         """已完成任务带时间戳格式 (Round N, YYYY-MM-DD HH:MM) 正确解析。"""
@@ -1230,83 +1279,394 @@ class TestExtractJsonTasksExtra:
     def test_braces_in_description_string(self):
         """description 中包含花括号 {user} {count}（字符串内）。"""
         text = '先扫描代码库...\n{"tasks": [{"id": 1, "description": "修改 {user} 变量"}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result is not None
-        assert result[0]["description"] == "修改 {user} 变量"
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks is not None
+        assert tasks[0]["description"] == "修改 {user} 变量"
+        assert tc is None
 
     def test_tilde_code_block(self):
         """~~~ 代码块。"""
         text = '结果：\n~~~json\n{"tasks": [{"id": 1, "title": "修复"}]}\n~~~'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1, "title": "修复"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1, "title": "修复"}]
+        assert tc is None
 
     def test_no_newline_before_closing_fence(self):
         """代码块无尾部换行就闭合。"""
         text = '```json\n{"tasks": [{"id": 1}]}```'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
     def test_no_newline_before_or_after_fence(self):
         """代码块无换行。"""
         text = '```{"tasks": [{"id": 1}]}```'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
     def test_deeply_nested_json(self):
         """深层嵌套的 JSON。"""
         text = '{"tasks": [{"id": 1, "meta": {"level": {"value": 3}}}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1, "meta": {"level": {"value": 3}}}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1, "meta": {"level": {"value": 3}}}]
+        assert tc is None
 
     def test_escaped_backslash_in_string(self):
         """字符串中的转义反斜杠。"""
         text = '{"tasks": [{"id": 1, "path": "C:\\\\dir\\\\file"}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1, "path": "C:\\dir\\file"}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1, "path": "C:\\dir\\file"}]
+        assert tc is None
 
     def test_mixed_code_block_variants(self):
         """多种代码块形式在同一个文本中（取第一个有效的）。"""
         text = '```\n{"tasks": [{"id": 1}]}\n``` 然后 ~~~\n{"tasks": [{"id": 2}]}\n~~~'
-        result = ac._extract_json_tasks(text)
+        tasks, tc = ac._extract_json_tasks(text)
         # 应匹配第一个 ``` 代码块
-        assert result == [{"id": 1}]
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
     def test_tasks_array_empty(self):
         """空 tasks 数组。"""
         text = '{"tasks": [], "summary": "无任务"}'
-        result = ac._extract_json_tasks(text)
-        assert result == []
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == []
+        assert tc is None
 
     def test_no_tasks_key_only_other_data(self):
         """JSON 有内容但无 tasks 键。"""
         text = '{"summary": "仅总结", "version": 2}'
-        result = ac._extract_json_tasks(text)
-        assert result is None
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks is None
+        assert tc is None
 
     def test_json_with_trailing_text(self):
         """JSON 后有额外文字。"""
         text = '{"tasks": [{"id": 1}], "summary": "ok"} 以上是任务列表。'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
     def test_preamble_with_angle_braces(self):
         """前置文本中有尖括号（非花括号，确保不受影响）。"""
         text = '<project> <name> 分析结果：{"tasks": [{"id": 1}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result == [{"id": 1}]
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks == [{"id": 1}]
+        assert tc is None
 
     def test_lone_close_brace_in_description(self):
         """description 字符串内包含孤立 }（字符串感知栈匹配的关键场景）。"""
         text = '{"tasks": [{"id": 1, "description": "替换 } 符号为 \\"}code", "title": "修复"}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result is not None
-        assert result[0]["description"] == '替换 } 符号为 "}code'
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks is not None
+        assert tasks[0]["description"] == '替换 } 符号为 "}code'
+        assert tc is None
 
     def test_all_braces_in_strings_only(self):
         """所有花括号出现在字符串值中，无实际嵌套结构。"""
         text = '{"tasks": [{"id": 1, "title": "处理 {placeholder} 和 } 符号", "desc": "a{b}c"}], "summary": "ok"}'
-        result = ac._extract_json_tasks(text)
-        assert result is not None
-        assert result[0]["title"] == '处理 {placeholder} 和 } 符号'
+        tasks, tc = ac._extract_json_tasks(text)
+        assert tasks is not None
+        assert tasks[0]["title"] == '处理 {placeholder} 和 } 符号'
+        assert tc is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# build_retry_prompt
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBuildRetryPrompt:
+    """测试构建测试失败后的修复 prompt。"""
+
+    def test_basic_retry_prompt(self):
+        task = {
+            "type": "bug fix",
+            "title": "修复空指针",
+            "description": "在 foo.py 加入 null 检查",
+        }
+        result = ac.build_retry_prompt(
+            task,
+            test_command="pytest tests/",
+            test_output="FAILED test_foo.py::test_bar - AssertionError",
+            changed_files=["src/foo.py", "tests/test_foo.py"],
+        )
+        assert "测试失败，需要修复" in result
+        assert "在 foo.py 加入 null 检查" in result
+        assert "pytest tests/" in result
+        assert "FAILED test_foo.py" in result
+        assert "src/foo.py" in result
+
+    def test_retry_prompt_no_files(self):
+        task = {"title": "某个任务", "description": "修改代码"}
+        result = ac.build_retry_prompt(
+            task,
+            test_command="make test",
+            test_output="error",
+            changed_files=[],
+        )
+        assert "(无文件改动)" in result
+
+    def test_retry_prompt_escapes_braces(self):
+        """task description 中的花括号应被正确转义。"""
+        task = {
+            "title": "test",
+            "description": "修改 {variable} 的值",
+        }
+        result = ac.build_retry_prompt(
+            task,
+            test_command="pytest",
+            test_output="fail",
+            changed_files=["a.py"],
+        )
+        # 不应抛出 KeyError
+        assert "修改 {variable} 的值" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# run_test_command
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestRunTestCommand:
+    """测试 run_test_command 函数。"""
+
+    def test_command_passes(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "All tests passed"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            passed, output = ac.run_test_command(
+                "pytest", "/tmp/test", 60,
+            )
+            assert passed is True
+            assert "All tests passed" in output
+
+    def test_command_fails(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "FAIL: test failed"
+
+        with patch("subprocess.run", return_value=mock_proc):
+            passed, output = ac.run_test_command(
+                "pytest", "/tmp/test", 60,
+            )
+            assert passed is False
+            assert "FAIL: test failed" in output
+
+    def test_command_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+            cmd="pytest", timeout=60,
+        )):
+            passed, output = ac.run_test_command(
+                "pytest", "/tmp/test", 60,
+            )
+            assert passed is False
+            assert "超时" in output
+
+    def test_command_exception(self):
+        with patch("subprocess.run", side_effect=OSError("not found")):
+            passed, output = ac.run_test_command(
+                "pytest", "/tmp/test", 60,
+            )
+            assert passed is False
+            assert "异常" in output
+
+    def test_command_uses_shell_and_cwd(self):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "ok"
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            ac.run_test_command("pytest -v", "/some/project", 120)
+            kwargs = mock_run.call_args.kwargs
+            assert kwargs["shell"] is True
+            assert kwargs["cwd"] == "/some/project"
+            assert kwargs["timeout"] == 120
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _execute_task_with_retry
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExecuteTaskWithRetry:
+    """测试带重试的任务执行逻辑（通过 mock）。"""
+
+    def test_no_test_command_returns_directly(self, tmp_workspace):
+        """无 test_command 时直接返回 agent 执行结果。"""
+        task = {"id": 1, "title": "test", "description": "do something"}
+        task_prompt = ac.build_task_prompt(task)
+
+        mock_result = {
+            "success": True, "summary": "done",
+            "changed_files": ["a.py"], "elapsed": 1.0,
+            "has_diff": True,
+        }
+
+        with patch.object(ac.cli, "_execute_single_round", return_value=mock_result):
+            result = ac.cli._execute_task_with_retry(
+                target_dir=tmp_workspace,
+                agent="pi",
+                task=task,
+                task_prompt=task_prompt,
+                test_command=None,
+                max_retries=3,
+                no_backup=True,
+                timeout=10,
+                agent_args=None,
+                keep_backups=0,
+                round_num=1,
+                sleep_between=0,
+            )
+        assert result["success"] is True
+        assert result["retries_used"] == 0
+        assert result["final_test_passed"] is None
+
+    def test_test_passes_on_first_try(self, tmp_workspace):
+        """测试在第一次尝试就通过。"""
+        task = {"id": 2, "title": "fix", "description": "fix"}
+        task_prompt = ac.build_task_prompt(task)
+
+        mock_result = {
+            "success": True, "summary": "fixed",
+            "changed_files": ["b.py"], "elapsed": 0.5,
+            "has_diff": True,
+        }
+
+        with patch.object(ac.cli, "_execute_single_round", return_value=mock_result):
+            with patch.object(ac.cli, "run_test_command", return_value=(True, "ok")):
+                result = ac.cli._execute_task_with_retry(
+                    target_dir=tmp_workspace,
+                    agent="pi",
+                    task=task,
+                    task_prompt=task_prompt,
+                    test_command="pytest",
+                    max_retries=3,
+                    no_backup=True,
+                    timeout=10,
+                    agent_args=None,
+                    keep_backups=0,
+                    round_num=1,
+                    sleep_between=0,
+                )
+        assert result["success"] is True
+        assert result["retries_used"] == 0
+        assert result["final_test_passed"] is True
+
+    def test_retry_and_eventually_pass(self, tmp_workspace):
+        """第一次测试失败，重试后通过。"""
+        task = {"id": 3, "title": "fix", "description": "fix"}
+        task_prompt = ac.build_task_prompt(task)
+
+        # 第一次 agent 调用成功但有文件改动
+        # 测试第一次失败，第二次通过
+        call_count = [0]
+
+        def mock_single_round(*args, **kwargs):
+            call_count[0] += 1
+            return {
+                "success": True, "summary": f"attempt {call_count[0]}",
+                "changed_files": ["c.py"], "elapsed": 0.3,
+                "has_diff": True,
+            }
+
+        test_results = [(False, "FAIL"), (True, "PASS")]
+        test_call_count = [0]
+
+        def mock_test(*args, **kwargs):
+            idx = test_call_count[0]
+            test_call_count[0] += 1
+            return test_results[min(idx, len(test_results) - 1)]
+
+        with patch.object(ac.cli, "_execute_single_round", side_effect=mock_single_round):
+            with patch.object(ac.cli, "run_test_command", side_effect=mock_test):
+                with patch("time.sleep"):  # 避免实际等待
+                    result = ac.cli._execute_task_with_retry(
+                        target_dir=tmp_workspace,
+                        agent="pi",
+                        task=task,
+                        task_prompt=task_prompt,
+                        test_command="pytest",
+                        max_retries=3,
+                        no_backup=True,
+                        timeout=10,
+                        agent_args=None,
+                        keep_backups=0,
+                        round_num=1,
+                        sleep_between=0,
+                    )
+        # 第一次尝试 + 第一次重试 = 2 次 agent 调用
+        assert call_count[0] == 2
+        assert result["retries_used"] == 1
+        assert result["final_test_passed"] is True
+
+    def test_all_retries_exhausted(self, tmp_workspace):
+        """所有重试都用完仍未通过测试。"""
+        task = {"id": 4, "title": "broken", "description": "unfixable"}
+        task_prompt = ac.build_task_prompt(task)
+
+        mock_result = {
+            "success": True, "summary": "try",
+            "changed_files": ["d.py"], "elapsed": 0.2,
+            "has_diff": True,
+        }
+
+        with patch.object(ac.cli, "_execute_single_round", return_value=mock_result):
+            with patch.object(ac.cli, "run_test_command", return_value=(False, "STILL FAIL")):
+                with patch("time.sleep"):
+                    result = ac.cli._execute_task_with_retry(
+                        target_dir=tmp_workspace,
+                        agent="pi",
+                        task=task,
+                        task_prompt=task_prompt,
+                        test_command="pytest",
+                        max_retries=2,
+                        no_backup=True,
+                        timeout=10,
+                        agent_args=None,
+                        keep_backups=0,
+                        round_num=1,
+                        sleep_between=0,
+                    )
+        assert result["retries_used"] == 2
+        assert result["final_test_passed"] is False
+
+    def test_no_diff_skips_test(self, tmp_workspace):
+        """本轮无文件改动时跳过测试。"""
+        task = {"id": 5, "title": "nop", "description": "nothing"}
+        task_prompt = ac.build_task_prompt(task)
+
+        mock_result = {
+            "success": True, "summary": "no changes",
+            "changed_files": [], "elapsed": 1.0,
+            "has_diff": False,
+        }
+
+        test_called = [False]
+        def mock_test(*args, **kwargs):
+            test_called[0] = True
+            return (True, "ok")
+
+        with patch.object(ac.cli, "_execute_single_round", return_value=mock_result):
+            with patch.object(ac.cli, "run_test_command", side_effect=mock_test):
+                result = ac.cli._execute_task_with_retry(
+                    target_dir=tmp_workspace,
+                    agent="pi",
+                    task=task,
+                    task_prompt=task_prompt,
+                    test_command="pytest",
+                    max_retries=3,
+                    no_backup=True,
+                    timeout=10,
+                    agent_args=None,
+                    keep_backups=0,
+                    round_num=1,
+                    sleep_between=0,
+                )
+        assert test_called[0] is False  # 测试不应被调用
+        assert result["final_test_passed"] is None
 
 

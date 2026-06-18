@@ -141,3 +141,55 @@ def call_agent(agent: str, prompt: str, target_dir: str,
         elapsed = time.time() - start
         print(f"  Agent 调用失败: {e}")
         return False, f"调用失败: {e}", "", elapsed
+
+
+def run_test_command(cmd: str, target_dir: str, timeout: int) -> tuple[bool, str]:
+    """执行测试命令，返回 (passed, output)。
+
+    Args:
+        cmd: 要执行的 shell 命令
+        target_dir: 工作目录
+        timeout: 超时秒数
+
+    Returns:
+        (passed, output): passed 为 True 表示测试通过（退出码 0），
+        output 为合并的 stdout + stderr。
+    """
+    print(f"  🧪 运行测试: {cmd}")
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=target_dir,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        elapsed = time.time() - start
+        output = proc.stdout
+        if proc.stderr:
+            output += "\n" + proc.stderr
+        output = output.strip()
+        passed = proc.returncode == 0
+        if passed:
+            print(f"  ✓ 测试通过 ({elapsed:.1f}s)")
+        else:
+            print(f"  ✗ 测试失败 (退出码 {proc.returncode}, {elapsed:.1f}s)")
+            # 打印测试输出的尾部方便快速定位
+            if output:
+                lines = output.split('\n')
+                tail = lines[-10:] if len(lines) > 10 else lines
+                print("  ── 测试输出尾部 ──")
+                for line in tail:
+                    print(f"  {line}")
+                print("  ── 结束 ──")
+        return passed, output
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start
+        print(f"  ✗ 测试超时 ({timeout}s)")
+        return False, f"测试命令超时（{timeout} 秒）"
+    except Exception as e:
+        elapsed = time.time() - start
+        print(f"  ✗ 测试执行异常: {e}")
+        return False, f"测试命令执行异常: {e}"

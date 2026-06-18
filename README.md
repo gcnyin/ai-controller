@@ -77,6 +77,7 @@ uv run ai-controller ./my-project --agent pi --agent-args "--model gpt-4"
 | `directory` | 目标代码目录（必填） | - |
 | `--agent` | 选 pi / opencode / claude / codex | pi |
 | `--max-rounds` | 最大轮数，0=无限 | 10 |
+| `--max-retries` | 测试失败时最大重试次数 | 3 |
 | `--timeout` | Agent 单轮超时秒数 | 600 |
 | `--sleep` | 每轮间隔秒数 | 2.0 |
 | `--no-backup` | 不备份（Git 仓库自动跳过备份） | false |
@@ -122,7 +123,10 @@ keep_backups = 5
 | | -> 备份（可选）             |
 | | -> 构建任务 prompt          |
 | | -> 调用 Agent 执行         |
-| | -> 检查改动，commit         |
+| | -> 检查改动                 |
+| | -> 运行测试命令（如有）     |
+| | -> 测试失败则重试修复       |
+| | -> commit（Git仓库）       |
 | | -> 标记任务为已完成         |
 | | -> 循环                    |
 | +----------------------------+

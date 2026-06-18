@@ -25,8 +25,8 @@ SKIP_DIRS = (".ai-controller-backups", ".git", "__pycache__", ".venv", "venv",
 
 # ── 子模块重导出 ──
 
-from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
-from .agent import AGENTS, call_agent, parse_summary, build_agent_command
+from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt, build_retry_prompt
+from .agent import AGENTS, call_agent, parse_summary, build_agent_command, run_test_command
 from .tasks import (
     TASK_FILE,
     generate_task_list,

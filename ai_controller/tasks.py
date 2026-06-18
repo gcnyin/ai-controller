@@ -18,7 +18,7 @@ TASK_FILE = "AI-TASKS.md"
 
 
 def generate_task_list(agent: str, target_dir: str,
-                       timeout: int, agent_args: Optional[list]) -> Optional[List[dict]]:
+                       timeout: int, agent_args: Optional[list]) -> tuple[Optional[List[dict]], Optional[str]]:
     """
     让 AI 扫描代码库并生成完整任务列表。
     返回解析后的任务列表，失败返回 None。
@@ -39,7 +39,7 @@ def generate_task_list(agent: str, target_dir: str,
         return None
 
     # 从输出中提取 JSON（_extract_json_tasks 内置了多层解析策略）
-    tasks = _extract_json_tasks(raw_output)
+    tasks, test_command = _extract_json_tasks(raw_output)
     if tasks is None:
         logger.warning("无法解析任务列表，将回退到逐轮模式")
         # ── 打印 AI 原始响应，方便用户排查 ──
@@ -54,9 +54,9 @@ def generate_task_list(agent: str, target_dir: str,
         print("=" * 60)
         print()
         logger.debug("AI 原始响应(DEBUG):\n%s", raw_output)
-        return None
+        return None, None
 
-    return tasks
+    return tasks, test_command
 
 
 def backup_task_file(target_dir: str):
@@ -71,12 +71,29 @@ def backup_task_file(target_dir: str):
     logger.info(f"已备份旧任务列表: {bak_name}")
 
 
-def _extract_json_tasks(text: str) -> Optional[List[dict]]:
-    """从 AI 输出中提取 JSON 任务列表。
+def _extract_json_tasks(text: str) -> tuple[Optional[List[dict]], Optional[str]]:
+    """从 AI 输出中提取 JSON 任务列表和测试命令。
 
+    返回 (tasks, test_command)，两者都可能为 None。
     假定 AI 输出纯 JSON，偶尔包裹在 markdown 代码块中。
     """
     text = text.strip()
+
+    def _parse_json(json_str: str) -> tuple[Optional[List[dict]], Optional[str]]:
+        """尝试从 JSON 字符串中解析 tasks 和 test_command。"""
+        try:
+            data = json.loads(json_str)
+            if isinstance(data, dict) and "tasks" in data:
+                tasks = data["tasks"]
+                tc = data.get("test_command", "")
+                # 空字符串视为无测试命令
+                tc = tc if isinstance(tc, str) and tc.strip() else None
+                return tasks, tc
+            if isinstance(data, list):
+                return data, None
+        except json.JSONDecodeError:
+            pass
+        return None, None
 
     # ── 匹配 markdown 代码块 ──
     patterns = [
@@ -87,36 +104,27 @@ def _extract_json_tasks(text: str) -> Optional[List[dict]]:
     ]
     for pat in patterns:
         for m in re.finditer(pat, text, re.DOTALL):
-            try:
-                data = json.loads(m.group(1).strip())
-                if isinstance(data, dict) and "tasks" in data:
-                    return data["tasks"]
-                if isinstance(data, list):
-                    return data
-            except json.JSONDecodeError:
-                continue
+            tasks, tc = _parse_json(m.group(1).strip())
+            if tasks is not None:
+                return tasks, tc
 
     # ── 回退：取第一个 { 到最后一个 } ──
     a = text.find('{')
     b = text.rfind('}')
     if a >= 0 and b > a:
-        try:
-            data = json.loads(text[a:b + 1])
-            if isinstance(data, dict) and "tasks" in data:
-                return data["tasks"]
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            pass
+        tasks, tc = _parse_json(text[a:b + 1])
+        if tasks is not None:
+            return tasks, tc
 
-    return None
+    return None, None
 
 
 def save_task_list(target_dir: str, tasks: List[dict],
                    run_count: int = 1,
                    last_run: str = "",
                    global_round: int = 0,
-                   gen_time: str = ""):
+                   gen_time: str = "",
+                   test_command: Optional[str] = None):
     """将任务列表保存到 AI-TASKS.md。
 
     Args:
@@ -124,6 +132,7 @@ def save_task_list(target_dir: str, tasks: List[dict],
         last_run: 最后运行时间字符串（YYYY-MM-DD HH:MM:SS）
         global_round: 全局轮次计数
         gen_time: 生成时间字符串，为空则使用当前时间
+        test_command: 项目测试命令，为空则跳过
     """
     gen_ts = gen_time if gen_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not last_run:
@@ -135,10 +144,14 @@ def save_task_list(target_dir: str, tasks: List[dict],
         f"运行次数: {run_count}",
         f"最后运行: {last_run}",
         f"全局轮次: {global_round}",
+    ]
+    if test_command:
+        lines.append(f"测试命令: {test_command}")
+    lines.extend([
         "",
         f"共 {len(tasks)} 个任务",
         "",
-    ]
+    ])
 
     # 按状态分组
     pending = []
@@ -205,6 +218,7 @@ def load_task_metadata(target_dir: str) -> Dict[str, Any]:
         "run_count": r'^运行次数:\s*(\d+)$',
         "last_run": r'^最后运行:\s*(.+)$',
         "global_round": r'^全局轮次:\s*(\d+)$',
+        "test_command": r'^测试命令:\s*(.+)$',
     }
 
     for line in content.split("\n"):
@@ -221,6 +235,7 @@ def load_task_metadata(target_dir: str) -> Dict[str, Any]:
     metadata.setdefault("last_run", "")
     metadata.setdefault("global_round", 0)
     metadata.setdefault("gen_time", "")
+    metadata.setdefault("test_command", "")
 
     return metadata
 

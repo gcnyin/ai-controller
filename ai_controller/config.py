@@ -107,6 +107,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
     known_params = {
         "agent",
         "max_rounds",
+        "max_retries",
         "timeout",
         "sleep",
         "no_backup",
@@ -123,7 +124,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
             value = raw[key]
             # 布尔值直接保留，数值也直接保留，字符串同理
             # 将 int 转为 int，float 转为 float，防止 TOML/YAML 的类型问题
-            if key in ("max_rounds", "timeout", "keep_backups"):
+            if key in ("max_rounds", "max_retries", "timeout", "keep_backups"):
                 try:
                     config[key] = int(value)
                 except (TypeError, ValueError):
