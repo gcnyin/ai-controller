@@ -616,9 +616,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             示例:
-              python ai_controller.py ./my-project --agent pi --max-rounds 10    # 先规划再执行,自动恢复
-              python ai_controller.py ./my-project --agent pi --replan           # 重新生成任务列表
-              python ai_controller.py ./my-project --agent pi --plan-only        # 仅生成任务列表
+              python -m ai_controller ./my-project --agent pi --max-rounds 10    # 先规划再执行,自动恢复
+              python -m ai_controller ./my-project --agent pi --replan           # 重新生成任务列表
+              python -m ai_controller ./my-project --agent pi --plan-only        # 仅生成任务列表
         """),
     )
     parser.add_argument("directory", help="目标代码目录")
