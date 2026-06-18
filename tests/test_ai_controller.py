@@ -1293,7 +1293,6 @@ class TestExtractJsonTasksExtra:
         text = '<project> <name> 分析结果：{"tasks": [{"id": 1}], "summary": "ok"}'
         result = ac._extract_json_tasks(text)
         assert result == [{"id": 1}]
-        assert result == [{"id": 1}]
 
     def test_lone_close_brace_in_description(self):
         """description 字符串内包含孤立 }（字符串感知栈匹配的关键场景）。"""
