@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 TASK_FILE = "AI-TASKS.md"
 
 
-def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
+def generate_task_list(agent: str, target_dir: str,
                        timeout: int, agent_args: Optional[list]) -> Optional[List[dict]]:
     """
     让 AI 扫描代码库并生成完整任务列表。
@@ -28,7 +28,7 @@ def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
     print(f"{'─' * 55}")
 
     success, summary, raw_output, elapsed = call_agent(
-        agent, PLAN_PROMPT, target_dir, ext_filter, timeout, agent_args,
+        agent, PLAN_PROMPT, target_dir, timeout, agent_args,
         quiet=True,
     )
 

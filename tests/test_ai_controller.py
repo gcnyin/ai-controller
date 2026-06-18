@@ -2,9 +2,8 @@
 
 覆盖以下纯逻辑函数：
 - _extract_json_tasks：从 agent 输出中提取 JSON 任务列表
-- check_ext_filter：文件后缀过滤
 - load_task_list / save_task_list / load_task_metadata / mark_task_done / get_next_pending_task：任务列表管理
-- parse_summary / extract_model_hint / build_ext_filter_arg / build_task_prompt：工具函数
+- parse_summary / extract_model_hint / build_task_prompt：工具函数
 - call_agent：subprocess 调用的 mock 测试
 """
 
@@ -135,10 +134,6 @@ class TestExtractJsonTasks:
         assert len(result) == 1
         assert result[0]["id"] == 1
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# check_ext_filter
-# ═══════════════════════════════════════════════════════════════════════
 
 class TestTaskListIO:
     """测试任务列表的保存、加载、标记完成、获取待执行任务。"""
@@ -418,10 +413,6 @@ class TestExtractModelHint:
         assert ac.extract_model_hint(args) == "claude-3"
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# build_ext_filter_arg
-# ═══════════════════════════════════════════════════════════════════════
-
 class TestBuildTaskPrompt:
     """测试为单个任务构建执行提示词。"""
 
@@ -528,23 +519,6 @@ class TestCallAgent:
             assert "gpt-4" in cmd_parts
             # prompt 应该是最后一个参数
             assert "修复 bug" in cmd_parts[-1]
-
-    def test_with_ext_filter(self):
-        """带 ext_filter 时 prompt 被合并。"""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate.return_value = ("SUMMARY: done", "")
-
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            ac.call_agent(
-                "pi", "原始 prompt", "/tmp/test",
-                ext_filter="只处理 .py 文件",
-            )
-            args, _ = mock_popen.call_args
-            cmd_parts = args[0]
-            full_prompt = cmd_parts[-1]
-            assert "只处理 .py 文件" in full_prompt
-            assert "原始 prompt" in full_prompt
 
     def test_generic_exception(self):
         """模拟非超时、非中断的其他异常。"""

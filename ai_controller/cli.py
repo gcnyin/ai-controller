@@ -253,7 +253,7 @@ def _execute_single_round(
 
     # ── 调用 Agent ──
     success, summary, raw_output, elapsed = call_agent(
-        agent, prompt, target_dir, None, timeout, agent_args,
+        agent, prompt, target_dir, timeout, agent_args,
         quiet=True,
     )
 
@@ -398,7 +398,7 @@ def run_loop(
             metadata = load_task_metadata(target_dir)
             logger.info("预览模式: 加载已有任务列表,跳过规划阶段 Agent 调用")
         if tasks is None:
-            tasks = generate_task_list(agent, target_dir, None, timeout, agent_args)
+            tasks = generate_task_list(agent, target_dir, timeout, agent_args)
         if tasks is None:
             logger.error("任务列表生成失败，退出。")
             if stashed:
@@ -536,7 +536,7 @@ def _build_dry_run_command(agent: str, prompt: str, agent_args: Optional[list],
     用 shlex.quote 包裹后拼接为可复制的字符串。
     """
     cmd_parts, _ = build_agent_command(
-        agent, prompt, target_dir, agent_args, None,
+        agent, prompt, target_dir, agent_args,
     )
     # prompt 作为最后一个参数,quote 以安全展示
     cmd_parts[-1] = shlex.quote(cmd_parts[-1])
@@ -703,7 +703,7 @@ def main():
         if args.replan:
             backup_task_file(str(target))
 
-        tasks = generate_task_list(args.agent, str(target), None, args.timeout, agent_args)
+        tasks = generate_task_list(args.agent, str(target), args.timeout, agent_args)
         if tasks is None:
             logger.error("规划失败,未能生成任务列表。")
             sys.exit(1)

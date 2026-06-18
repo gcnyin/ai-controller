@@ -33,8 +33,7 @@ AGENTS = {
 
 
 def build_agent_command(agent: str, prompt: str, target_dir: str,
-                       extra_args: list | None = None,
-                       ext_filter: str | None = None) -> tuple[list[str], str | None]:
+                       extra_args: list | None = None) -> tuple[list[str], str | None]:
     """构建 Agent 命令行，返回 (命令列表, cwd)。
 
     call_agent 和 _build_dry_run_command 共用此函数，
@@ -45,10 +44,6 @@ def build_agent_command(agent: str, prompt: str, target_dir: str,
         不需要额外设置 subprocess cwd。
     """
     cfg = AGENTS[agent]
-
-    full_prompt = prompt
-    if ext_filter:
-        full_prompt = ext_filter + "\n\n" + prompt
 
     cmd_parts = [cfg["cmd"]]
     if extra_args:
@@ -61,7 +56,7 @@ def build_agent_command(agent: str, prompt: str, target_dir: str,
     else:
         cwd = target_dir
 
-    cmd_parts.append(full_prompt)
+    cmd_parts.append(prompt)
     return cmd_parts, cwd
 
 
@@ -76,7 +71,6 @@ def parse_summary(output: str) -> str:
 
 
 def call_agent(agent: str, prompt: str, target_dir: str,
-               ext_filter: str | None = None,
                timeout: int = 600,
                extra_args: list | None = None,
                quiet: bool = False) -> tuple[bool, str, str, float]:
@@ -87,7 +81,7 @@ def call_agent(agent: str, prompt: str, target_dir: str,
     quiet=True 时不打印 agent 的原始输出（不打印 prompt 和冗余输出）。
     """
     cmd_parts, cwd = build_agent_command(
-        agent, prompt, target_dir, extra_args, ext_filter,
+        agent, prompt, target_dir, extra_args,
     )
 
     if not quiet:
