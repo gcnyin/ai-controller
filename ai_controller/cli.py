@@ -600,7 +600,7 @@ def _dry_run_task_loop(target_dir: str, agent: str, tasks: list,
 
         # 构建任务 prompt 并打印计划
         prompt = build_task_prompt(task)
-        _print_dry_run_round(agent, round_num, prompt, agent_args, None, target_dir)
+        _print_dry_run_round(agent, round_num, prompt, agent_args, target_dir)
 
     print(f"\n{'─' * 55}")
     print(f"  预览完成: 共 {len(pending)} 个待执行任务,预览 {min(round_num, len(pending))} 个")
