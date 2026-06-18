@@ -367,8 +367,8 @@ def _execute_task_with_retry(
             result["final_test_passed"] = None
             return result
 
-        # 有测试命令但无文件改动：跳过测试
-        if not result["has_diff"]:
+        # 首次尝试无文件改动时跳过测试；重试阶段始终运行测试
+        if not is_retry and not result["has_diff"]:
             result["elapsed"] = total_elapsed
             result["retries_used"] = retries_used
             result["final_test_passed"] = None
