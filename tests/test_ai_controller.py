@@ -435,7 +435,7 @@ class TestBuildTaskPrompt:
         assert "修复类" in result
         assert "修复空指针" in result
         assert "在 foo.py 加入 null 检查" in result
-        assert "当前任务" in result
+        assert "Current Task" in result
 
     def test_task_without_type(self):
         task = {"title": "无类型任务", "description": "描述"}

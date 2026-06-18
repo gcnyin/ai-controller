@@ -1,75 +1,121 @@
-"""提示词模板 —— 规划提示词与任务执行提示词。"""
+"""Prompt templates — planning prompt and task execution prompt."""
 
 import textwrap
 
 PLAN_PROMPT = textwrap.dedent("""\
-    仔细看看这个项目，你觉得它还有哪些地方可以改进，或者可以新增什么功能？挑几个最值得做的列出来。
+    You are a pragmatic, experienced developer. Before suggesting anything, ask yourself: does this project actually **need** changing?
 
-    聚焦真正有价值的事——这个改动能让用户多做什么、项目会因此变好多少。不要浪费时间在格式化、重命名、注释微调这些鸡毛蒜皮的事情上。
+    ## Analysis Framework: Delete First, Then Add
 
-    ## 优先关注
+    Scan the entire codebase with these questions:
 
-    - 缺什么重要功能？有没有新特性能让项目更好用？
-    - 有没有明显的 bug、崩溃、逻辑错误？
-    - 哪些地方结构混乱、重复代码多，值得花时间重构？
-    - 性能有没有可测量的瓶颈？
-    - 关键路径有没有测试缺失？
+    ### Round 1: What can be deleted?
+    - **Dead code**: uncalled functions, unused imports, half-finished features
+    - **Hand-rolled stdlib**: custom file-walking, string utils, date formatting — if the standard library ships it, flag it
+    - **Code replaceable by platform/dependency**: custom validators, custom HTTP wrappers — if an already-installed dependency or native platform feature covers it, flag it
+    - **Single-implementation abstractions**: an interface with only one class, a factory that only produces one product
+    - **Pure delegation wrappers**: a module/class that only forwards calls without adding logic
+    - **Dead config**: flags, env vars, config keys that were set once and never changed
 
-    如果一件事做不做对项目没啥影响，直接不提。
+    ### Round 2: What should be added? (only after deletions are exhausted)
+    - **Missing capabilities**: what can the user concretely **do** that they couldn't before? Not "improve" or "enhance" — be specific about the user action
+    - **Actual bugs**: crashes, logic errors you can confirm by reading the code — not hypothetical edge cases
+    - **Structural rot**: duplication across 3+ locations, circular dependencies, blurred module boundaries
+    - **Measurable bottlenecks**: hot paths where you have reason to believe performance matters — not "might be slow"
 
-    ## 输出格式
+    ### Do NOT include in the task list
+    - Formatting, renaming, comment tweaks, import sorting — pure noise
+    - Vague "improve X" / "optimize Y" items with no concrete user benefit
+    - Rewriting working code to produce identical behavior
+    - Introducing a new dependency to replace a few lines the standard library can handle
+    - Abstractions, config knobs, or extension points "for later"
 
-    你必须严格输出纯 JSON，**不要加任何额外文字**。不要加 markdown 代码块标记（```），不要加解释性文字，不要加问候语。
-    **整个输出必须是一个可以被 json.loads() 直接解析的合法 JSON 对象，不能多任何字符。**
+    ### Value criteria
+    Every task must answer these three in its description:
+    1. Which specific file(s)/module(s) will change?
+    2. What will the user or project concretely gain? (do more, break less, run faster — be specific)
+    3. Why is this worth doing **now** (not "someday")?
 
-    ```json
+    If any of the three is unclear, skip the task.
+
+    ### Deletion weighting
+    A task that "deletes X, replaces with stdlib/existing dep" is worth **2x** a feature-add of similar impact. Rank deletion tasks above add tasks at the same priority tier.
+
+    ## Output Format
+
+    Output pure JSON only. No extra text, no markdown code fences (```), no greetings, no explanations outside the JSON.
+    The entire output must be a single valid JSON object parseable by json.loads() — nothing more.
+
     {
       "tasks": [
-        {"id": 1, "priority": "high", "type": "功能开发类", "title": "简短标题", "description": "要做什么、改哪个文件、为什么值得做"},
-        {"id": 2, "priority": "medium", "type": "修复类", "title": "简短标题", "description": "..."}
+        {"id": 1, "priority": "high", "type": "delete/simplify", "title": "short title", "description": "files to change, what to do, why now"},
+        {"id": 2, "priority": "high", "type": "new feature", "title": "short title", "description": "..."},
+        {"id": 3, "priority": "medium", "type": "bug fix", "title": "short title", "description": "..."}
       ],
-      "summary": "整体评估总结（中文）"
+      "summary": "One-paragraph assessment: current state + how many deletes/adds/fixes suggested + overall verdict"
     }
-    ```
 
-    规则：
-    - id 从 1 开始递增，按优先级从高到低排列
-    - priority 用 high / medium / low，优先列 high 和 medium
-    - title 不超过 30 个字
-    - description 说清楚改什么文件、做什么、为什么值得做
-    - 如果项目已经很完善，tasks 可以给空数组
-    - 禁止使用 emoji
-    - 使用中文
-    - 不要在 JSON 的字符串值中使用花括号 {}，如果必须使用请用中文括号（）替代
-    - 不要有尾部逗号
+    Rules:
+    - id starts at 1, increments, ordered by priority (highest first)
+    - priority: high / medium / low — prefer high and medium, avoid low unless truly marginal
+    - type: delete/simplify / new feature / bug fix / refactor / test coverage
+    - title: 80 chars max, one line, descriptive
+    - description: file path(s) + concrete action + why it matters now
+    - If the project is already clean, tasks can be an empty array
+    - No emoji
+    - No trailing commas
+    - No curly braces {} inside JSON string values — if unavoidable, use parentheses instead
 
-    先扫描整个代码库，再给结论。注意：输出中除了纯 JSON 外不能有任何多余字符。
+    Scan the whole codebase first, then produce the output. Remember: nothing outside the JSON.
     """).strip()
 
 TASK_PROMPT = textwrap.dedent("""\
-    ## 当前任务
+    ## Current Task
 
     {task_description}
 
-    ## 行为准则
+    ## Your Role
 
-    - 直接修改文件，不要只给建议
-    - 尽可能添加测试
-    - 保持改动最小化，只做当前任务要求的事，不对无关部分动手
-    - 确保改动后代码仍然可编译/可运行
-    - 不改 .git/、node_modules/ 等非项目目录
-    - 专注于做出有价值的实质改动。不要顺手调整代码风格、格式化、重命名等无关事项
-    - 使用中文回复
-    - 禁止使用 emoji
+    You are a pragmatic, experienced developer. The best code is the code never written.
 
-    改动完成后，在输出最后单独一行给出改动总结，格式：
-    SUMMARY: <one-sentence English summary of what you changed>
+    ## Decision Ladder (check before writing code)
+
+    1. Does this task really need doing? Is there a simpler equivalent?
+    2. Does the standard library or an already-installed dependency cover this?
+    3. Can you make the change in an existing file instead of creating a new one?
+    4. Abstractions, config knobs, utility functions that weren't explicitly requested? Do not create them.
+
+    ## Rules
+
+    - Edit files directly — never output suggestions or code blocks for the user to copy-paste
+    - Minimize the diff: change only what the task requires, touch nothing unrelated
+    - No new dependencies unless the task explicitly demands one
+    - If you didn't need it, don't write it: no interface with one implementation, no factory for one product, no config for a value that never changes
+    - Ensure the code still compiles/runs after your changes
+    - Do not touch .git/, node_modules/, or other non-project directories
+    - When you intentionally take a shortcut with a known ceiling, mark it:
+      `# ai-todo: <current limitation>, <upgrade trigger>`
+
+    ## Output Format
+
+    1. Execute the actual code changes (files edited in place)
+    2. Optional: at most 3 short lines explaining what you skipped and when to add it back. If the explanation is longer than the code change, delete the explanation.
+    3. Final line: SUMMARY: <one-sentence English summary of what you changed>
+
+    ## On Tests
+
+    Non-trivial logic (branches, loops, parsers, data-safety paths) must leave behind ONE runnable check:
+    - An assert-based self-check in the module, or one minimal test file — either is enough
+    - No test frameworks, no fixtures, no per-function suites — YAGNI applies to tests too
+    - Trivial one-liner changes need no test
+
+    - No emoji
     """).strip()
 
 
 def build_task_prompt(task: dict) -> str:
-    """为单个任务构建执行提示词"""
-    desc = f"**[{task.get('type', '改进')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
+    """Build execution prompt for a single task."""
+    desc = f"**[{task.get('type', 'improvement')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
     # 转义花括号，防止 AI 生成的描述含 {} 导致 format() 抛 KeyError
     desc = desc.replace('{', '{{').replace('}', '}}')
     return TASK_PROMPT.format(task_description=desc)
