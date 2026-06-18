@@ -16,7 +16,7 @@ import logging
 from . import LOG_FILE, LOGGER_FILE
 from .config import load_config
 from .agent import AGENTS, call_agent, build_agent_command
-from .prompts import TASK_PROMPT, build_task_prompt
+from .prompts import build_task_prompt
 from .tasks import (
     TASK_FILE,
     generate_task_list,
