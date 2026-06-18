@@ -292,7 +292,7 @@ def load_task_list(target_dir: str) -> Optional[List[dict]]:
                 # 按顺序解析方括号标签，最多两个（priority, type）
                 remaining = tail
                 tags_found = 0
-                while remaining.startswith("["):
+                while tags_found < 2 and remaining.startswith("["):
                     bm = re.match(r'\[([^\]]+)\]\s*', remaining)
                     if not bm:
                         break

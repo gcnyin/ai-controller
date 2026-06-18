@@ -124,7 +124,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
             value = raw[key]
             # 布尔值直接保留，数值也直接保留，字符串同理
             # 将 int 转为 int，float 转为 float，防止 TOML/YAML 的类型问题
-            if key in ("max_rounds", "timeout", "keep_backups", "tasks_per_run"):
+            if key in ("max_rounds", "timeout", "keep_backups"):
                 try:
                     config[key] = int(value)
                 except (TypeError, ValueError):
@@ -134,7 +134,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
                     config[key] = float(value)
                 except (TypeError, ValueError):
                     pass
-            elif key in ("agent", "agent_args", "test_command"):
+            elif key in ("agent", "agent_args"):
                 config[key] = str(value)
             elif key in ("no_backup", "plan_only", "replan", "dry_run"):
                 config[key] = bool(value)

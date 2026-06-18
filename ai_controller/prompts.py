@@ -70,4 +70,6 @@ TASK_PROMPT = textwrap.dedent("""\
 def build_task_prompt(task: dict) -> str:
     """为单个任务构建执行提示词"""
     desc = f"**[{task.get('type', '改进')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
+    # 转义花括号，防止 AI 生成的描述含 {} 导致 format() 抛 KeyError
+    desc = desc.replace('{', '{{').replace('}', '}}')
     return TASK_PROMPT.format(task_description=desc)
