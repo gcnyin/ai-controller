@@ -12,8 +12,6 @@
 向后兼容：所有公开 API 及测试所需的私有函数均在包级别重新导出。
 """
 
-import subprocess  # 测试需要 ac.subprocess.TimeoutExpired
-
 
 # ── 全局常量 ──
 

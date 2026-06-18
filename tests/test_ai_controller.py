@@ -475,7 +475,7 @@ class TestCallAgent:
     def test_timeout(self):
         """模拟 agent 超时。"""
         mock_proc = MagicMock()
-        mock_proc.communicate.side_effect = ac.subprocess.TimeoutExpired(
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(
             cmd=["pi"], timeout=600,
         )
 
