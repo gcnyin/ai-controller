@@ -1,10 +1,13 @@
 """备份管理 —— 目录备份与旧备份清理。"""
 
+import logging
 import shutil
 from pathlib import Path
 from datetime import datetime
 
 from . import SKIP_DIRS
+
+logger = logging.getLogger(__name__)
 
 BACKUP_DIR_NAME = ".ai-controller-backups"
 
@@ -23,7 +26,7 @@ def backup_all(target_dir: str, round_num: int) -> Path | None:
         )
         return backup_folder
     except Exception as e:
-        print(f"  ⚠ 备份失败: {e}")
+        logger.warning(f"备份失败: {e}")
         return None
 
 
@@ -59,4 +62,4 @@ def cleanup_old_backups(target_dir: str, keep_count: int):
         try:
             shutil.rmtree(d)
         except Exception as e:
-            print(f"  ⚠ 清理旧备份 {d.name} 失败: {e}")
+            logger.warning(f"清理旧备份 {d.name} 失败: {e}")
