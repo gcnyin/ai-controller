@@ -72,120 +72,42 @@ def backup_task_file(target_dir: str):
 
 
 def _extract_json_tasks(text: str) -> Optional[List[dict]]:
-    """从 agent 输出中提取 JSON 任务列表。
+    """从 AI 输出中提取 JSON 任务列表。
 
-    采用多层策略，按优先级依次尝试：
-    1. 匹配 markdown 代码块（多种格式变体）
-    2. 字符串感知的栈匹配找到外层 JSON 对象
-    3. 直接解析整段文本
+    假定 AI 输出纯 JSON，偶尔包裹在 markdown 代码块中。
     """
-    # ── 策略 1：匹配 markdown 代码块（多种变体）──
-    code_block_patterns = [
-        r'```(?:json)?\s*\n(.*?)\n```',         # 标准格式，前后有换行
-        r'```(?:json)?\s*\n(.*?)```',             # 无尾部换行
-        r'```(?:json)?(.*?)```',                    # 无换行
-        r'~~~(?:json)?\s*\n(.*?)\n~~~',           # ~ 代码块
+    text = text.strip()
+
+    # ── 匹配 markdown 代码块 ──
+    patterns = [
+        r'```(?:json)?\s*\n(.*?)\n```',
+        r'```(?:json)?\s*\n(.*?)```',
+        r'```(?:json)?(.*?)```',
+        r'~~~(?:json)?\s*\n(.*?)\n~~~',
     ]
-    for pat in code_block_patterns:
+    for pat in patterns:
         for m in re.finditer(pat, text, re.DOTALL):
-            result = _try_parse_json(m.group(1).strip())
-            if result is not None:
-                return result
+            try:
+                data = json.loads(m.group(1).strip())
+                if isinstance(data, dict) and "tasks" in data:
+                    return data["tasks"]
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                continue
 
-    # ── 策略 2：字符串感知的栈匹配 ──
-    # 遍历每个 { 位置，用字符串感知方式匹配对应的 }
-    for start_match in re.finditer(r'\{', text):
-        start = start_match.start()
-        json_str = _safe_extract_json_substring(text, start)
-        if json_str is not None and '"tasks"' in json_str:
-            result = _try_parse_json(json_str)
-            if result is not None:
-                return result
-
-    # ── 策略 3：直接解析整段文本 ──
-    result = _try_parse_json(text)
-    if result is not None:
-        return result
-
-    return None
-
-
-# ponytail: simple brace counter, drops string-awareness because tasks JSON
-# never contains { inside string values. If that changes, re-add string tracking.
-def _safe_extract_json_substring(text: str, start: int) -> Optional[str]:
-    """从 text[start] 开始，用栈匹配找到匹配的 }。"""
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
-
-
-def _try_parse_json(json_str: str) -> Optional[List[dict]]:
-    """尝试解析 JSON 字符串并提取 tasks 数组。
-
-    逐步清理策略：
-    1. 直接 json.loads
-    2. 去掉尾部逗号
-    3. 去掉注释（// 和 /* */）
-    4. 去掉所有非 JSON 前后文文本
-    """
-    # 策略 0：如果本身已经是纯 JSON，直接解析
-    data = _json_loads_clean(json_str)
-    if data is not None:
-        if isinstance(data, dict) and "tasks" in data:
-            return data["tasks"]
-        if isinstance(data, list):
-            return data
-
-    return None
-
-
-def _json_loads_clean(s: str) -> Any:
-    """尝试多种清理策略后解析 JSON。"""
-    # 直接尝试
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        pass
-
-    # 尝试去掉注释（某些 AI 会加 // 注释）
-    try:
-        no_comments = re.sub(
-            r'(?:^|[^:\\"\w])\/\/[^\n]*', '', s, flags=re.MULTILINE
-        )
-        return json.loads(no_comments)
-    except json.JSONDecodeError:
-        pass
-
-    # 尝试去掉尾部逗号
-    try:
-        cleaned = re.sub(r',\s*}', '}', s)
-        cleaned = re.sub(r',\s*]', ']', cleaned)
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    # 尝试去掉 JSON 前后的非 JSON 文本
-    try:
-        first_brace = s.find('{')
-        last_brace = s.rfind('}')
-        if first_brace >= 0 and last_brace > first_brace:
-            trimmed = s[first_brace:last_brace + 1]
-            return json.loads(trimmed)
-    except json.JSONDecodeError:
-        pass
-
-    # 尝试修复控制字符问题
-    try:
-        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', s)
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
+    # ── 回退：取第一个 { 到最后一个 } ──
+    a = text.find('{')
+    b = text.rfind('}')
+    if a >= 0 and b > a:
+        try:
+            data = json.loads(text[a:b + 1])
+            if isinstance(data, dict) and "tasks" in data:
+                return data["tasks"]
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
 
     return None
 

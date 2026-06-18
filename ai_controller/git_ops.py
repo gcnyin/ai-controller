@@ -95,6 +95,18 @@ def git_stash_pop(target_dir: str) -> bool:
         return False
 
 
+def _strip_git_quotes(path: str) -> str:
+    """去除 git status --porcelain 输出中的路径引号。
+
+    git status --porcelain 对含空格等特殊字符的路径会用双引号包裹，
+    如 '"path with spaces"'。去除首尾的双引号。
+    """
+    path = path.strip()
+    if path.startswith('"') and path.endswith('"') and len(path) >= 2:
+        return path[1:-1]
+    return path
+
+
 def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
     """获取本轮改动的文件列表。
 
@@ -123,10 +135,14 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
                     continue
                 # git status --porcelain: "XY filename" -- X=staged, Y=unstaged
                 # 取第 4 个字符开始的路径（处理重命名时是 "R  old -> new"）
-                path = line[3:].strip()
+                raw_path = line[3:].strip()
                 # 处理重命名格式: "old -> new"
-                if " -> " in path:
-                    path = path.split(" -> ")[-1]
+                if " -> " in raw_path:
+                    parts = raw_path.split(" -> ")
+                    # 取重命名后的目标路径，并去除可能存在的 git 引号
+                    path = _strip_git_quotes(parts[-1])
+                else:
+                    path = _strip_git_quotes(raw_path)
                 if not path:
                     continue
                 # 过滤控制器自身的管理文件
