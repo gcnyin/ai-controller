@@ -15,9 +15,6 @@ AI 自迭代控制器 —— 调用 pi/opencode/claude/codex 让 AI 自动循环
     # 只生成任务列表 AI-TASKS.md
     python ai_controller.py ./my-project --agent pi --plan-only
 
-    # 传统模式：每轮 AI 自行选择
-    python ai_controller.py ./my-project --agent pi --max-rounds 10 --no-plan
-
     # 重新规划任务列表
     python ai_controller.py ./my-project --agent pi --replan
 """
