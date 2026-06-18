@@ -22,7 +22,6 @@ from .agent import AGENTS, call_agent, build_agent_command
 from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
 from .tasks import (
     TASK_FILE,
-    TASK_FILE_BAK,
     generate_task_list,
     save_task_list,
     load_task_list,

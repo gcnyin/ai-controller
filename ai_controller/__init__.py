@@ -7,7 +7,7 @@
     tasks      - 任务列表管理（生成/加载/保存/标记）
     backup     - 备份管理（backup_all, cleanup_old_backups）
     git_ops    - Git 操作（is_git_repo, has_changes, git_commit 等）
-    validation - 质量验证与回滚（run_py_compile, run_pytest, run_test_command, rollback_and_record）
+    validation - 质量验证与回滚（run_test_command, rollback_and_record）
     test_detector - 测试命令自动发现（detect_test_command）
     cli        - CLI 入口与主循环（main, run_loop 等）
 
@@ -33,7 +33,6 @@ from .prompts import PLAN_PROMPT, TASK_PROMPT, build_task_prompt
 from .agent import AGENTS, call_agent, parse_summary, build_agent_command
 from .tasks import (
     TASK_FILE,
-    TASK_FILE_BAK,
     generate_task_list,
     save_task_list,
     load_task_list,
@@ -48,10 +47,7 @@ from .tasks import (
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
 from .validation import (
-    run_py_compile,
-    run_pytest,
     run_test_command,
-    has_tests,
     rollback_and_record,
 )
 from .test_detector import detect_test_command

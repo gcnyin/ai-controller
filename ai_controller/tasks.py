@@ -15,7 +15,6 @@ from .prompts import PLAN_PROMPT
 logger = logging.getLogger(__name__)
 
 TASK_FILE = "AI-TASKS.md"
-TASK_FILE_BAK = "AI-TASKS.md.bak"  # 旧常量，保留兼容
 
 
 def generate_task_list(agent: str, target_dir: str, ext_filter: Optional[str],
@@ -111,39 +110,18 @@ def _extract_json_tasks(text: str) -> Optional[List[dict]]:
     return None
 
 
+# ponytail: simple brace counter, drops string-awareness because tasks JSON
+# never contains { inside string values. If that changes, re-add string tracking.
 def _safe_extract_json_substring(text: str, start: int) -> Optional[str]:
-    """从 text[start] 开始，用字符串感知的栈匹配找到匹配的 }。
-
-    正确处理 JSON 字符串内的 {、}、\\ 转义，不会因描述文本中的
-    花括号导致匹配错误。
-    """
+    """从 text[start] 开始，用栈匹配找到匹配的 }。"""
     depth = 0
-    i = start
-    in_string = False
-    escape = False
-
-    while i < len(text):
-        ch = text[i]
-
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == '"':
-                in_string = False
-        else:
-            if ch == '"':
-                in_string = True
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    return text[start:i + 1]
-
-        i += 1
-
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
     return None
 
 
@@ -158,16 +136,6 @@ def _try_parse_json(json_str: str) -> Optional[List[dict]]:
     """
     # 策略 0：如果本身已经是纯 JSON，直接解析
     data = _json_loads_clean(json_str)
-    if data is not None:
-        if isinstance(data, dict) and "tasks" in data:
-            return data["tasks"]
-        if isinstance(data, list):
-            return data
-
-    # 策略 1：去掉尾部逗号
-    cleaned = re.sub(r',\s*}', '}', json_str)
-    cleaned = re.sub(r',\s*]', ']', cleaned)
-    data = _json_loads_clean(cleaned)
     if data is not None:
         if isinstance(data, dict) and "tasks" in data:
             return data["tasks"]

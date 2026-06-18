@@ -1,15 +1,10 @@
 """代码质量验证与回滚模块。
 
 提供底层工具函数：
-1. run_py_compile — 对改动文件进行语法检查
-2. run_pytest — 运行 pytest 测试
-3. has_tests — 检测项目是否有测试配置
-4. rollback_and_record — 精确回滚本轮改动并记录到 CHANGELOG
+1. run_test_command — 运行任意测试命令
+2. rollback_and_record — 精确回滚本轮改动并记录到 CHANGELOG
 """
 
-import os
-import re
-import sys
 import subprocess
 import logging
 from pathlib import Path
@@ -18,156 +13,6 @@ from typing import Optional
 
 
 logger = logging.getLogger(__name__)
-
-
-PYTEST_TIMEOUT = 60
-"""pytest 单次运行默认超时（秒）。"""
-
-
-# ─── 辅助: 检查项目是否有测试 ────────────────────────────────────────
-
-def has_tests(target_dir: str) -> bool:
-    """检查目标目录是否有可运行的测试。
-
-    依次检查:
-      1. tests/ 目录是否存在
-      2. pytest.ini 文件是否存在
-      3. pyproject.toml 中是否包含 [tool.pytest.ini_options]
-    """
-    target_path = Path(target_dir)
-
-    if (target_path / "tests").is_dir():
-        return True
-    if (target_path / "pytest.ini").is_file():
-        return True
-
-    pyproject = target_path / "pyproject.toml"
-    if pyproject.is_file():
-        try:
-            content = pyproject.read_text(encoding="utf-8")
-            if "[tool.pytest.ini_options]" in content:
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
-# ─── py_compile 语法检查 ─────────────────────────────────────────────
-
-def run_py_compile(target_dir: str, changed_files: list[str]) -> list[tuple[str, str]]:
-    """对改动的 .py 文件逐个执行 python -m py_compile 语法检查。
-
-    Args:
-        target_dir: 项目根目录（用于拼接绝对路径）
-        changed_files: 本轮改动的文件列表（相对路径）
-
-    Returns:
-        (file, error_message) 列表，空列表表示全部通过
-    """
-    errors: list[tuple[str, str]] = []
-
-    for filepath in changed_files:
-        if not filepath.endswith(".py"):
-            continue
-        full_path = Path(target_dir) / filepath
-        if not full_path.is_file():
-            continue
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "py_compile", str(full_path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if proc.returncode != 0:
-                msg = (proc.stderr or proc.stdout or "").strip()
-                if not msg:
-                    msg = f"py_compile 退出码 {proc.returncode}"
-                errors.append((filepath, msg))
-        except subprocess.TimeoutExpired:
-            errors.append((filepath, "py_compile 超时 (30s)"))
-        except Exception as e:
-            errors.append((filepath, str(e)))
-
-    return errors
-
-
-# ─── pytest 测试 ──────────────────────────────────────────────────────
-
-def run_pytest(target_dir: str, timeout: int = PYTEST_TIMEOUT) -> dict:
-    """运行 pytest 测试（快速模式：-x --tb=short -q）。
-
-    Args:
-        target_dir: 项目根目录（作为 cwd）
-        timeout: 超时秒数
-
-    Returns:
-        dict with keys:
-            success:  bool   — 测试是否全部通过
-            output:   str    — 合并的 stdout + stderr
-            passed:   int    — 通过的测试数（粗略，失败时可能为 0）
-            failed:   int    — 失败的测试数
-            error:    str    — 异常/超时/未安装时的错误描述
-    """
-    result: dict = {
-        "success": False,
-        "output": "",
-        "passed": 0,
-        "failed": 0,
-        "error": "",
-    }
-
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "-x", "--tb=short", "-q"],
-            cwd=target_dir,
-            capture_output=True, text=True, timeout=timeout,
-        )
-
-        output = proc.stdout or ""
-        stderr = proc.stderr or ""
-        result["output"] = output + ("\n" + stderr if stderr else "")
-
-        # 从 pytest -q 输出中解析计数
-        # 输出格式示例: ".F..                                                  [100%]"
-        # 最后一行: "1 failed, 3 passed in 0.12s"
-        # 或: "3 passed in 0.12s"
-        # 或: "no tests ran"
-        for line in output.splitlines():
-            line = line.strip().lower()
-            if "passed" in line or "failed" in line:
-                # 尝试解析 "N passed" 和 "M failed"
-                passed_m = re.search(r"(\d+)\s+passed", line)
-                failed_m = re.search(r"(\d+)\s+failed", line)
-                if passed_m:
-                    result["passed"] = int(passed_m.group(1))
-                if failed_m:
-                    result["failed"] = int(failed_m.group(1))
-                break
-
-        if proc.returncode == 0:
-            result["success"] = True
-        elif proc.returncode == 1:
-            # 有测试失败
-            result["success"] = False
-        elif proc.returncode == 5:
-            # 未发现测试 — 不是错误
-            result["success"] = True
-            result["error"] = "未发现任何测试"
-        else:
-            result["error"] = f"pytest 异常退出 (code={proc.returncode})"
-
-        return result
-
-    except subprocess.TimeoutExpired:
-        result["error"] = f"pytest 超时 ({timeout} 秒)"
-        return result
-    except FileNotFoundError:
-        result["error"] = "pytest 未安装"
-        return result
-    except Exception as e:
-        result["error"] = str(e)
-        return result
 
 
 # ─── 运行自定义测试命令 ─────────────────────────────────────────────
