@@ -1,12 +1,9 @@
 """CLI 入口与主循环 -- 命令行解析、迭代调度、日志记录。"""
 
-import os
-import re
 import sys
 import time
 import shlex
 import shutil
-import subprocess
 import argparse
 import textwrap
 from pathlib import Path
@@ -16,10 +13,10 @@ from typing import Optional, Tuple, List
 
 import logging
 
-from . import LOG_FILE, LOGGER_FILE, rollback_and_record, detect_test_command, run_test_command
+from . import LOG_FILE, LOGGER_FILE
 from .config import load_config
 from .agent import AGENTS, call_agent, build_agent_command
-from .prompts import TASK_PROMPT, build_task_prompt, PLAN_PROMPT
+from .prompts import TASK_PROMPT, build_task_prompt
 from .tasks import (
     TASK_FILE,
     generate_task_list,
@@ -31,7 +28,6 @@ from .tasks import (
     backup_task_file,
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
-from .tasks import TASK_FILE
 from .git_ops import (
     is_git_repo,
     has_changes,
@@ -42,38 +38,6 @@ from .git_ops import (
     get_git_diff_summary,
 )
 
-
-# ─── 文件过滤参数 ─────────────────────────────────────────────────────
-
-def build_ext_filter_arg(agent: str, exts: Optional[set]) -> Optional[str]:
-    """构建文件过滤参数。目前通过 prompt 形式告知 agent。"""
-    if not exts:
-        return None
-    ext_list = ", ".join(sorted(exts))
-    return f"只处理 {ext_list} 文件,忽略其他文件类型。"
-
-
-def check_ext_filter(changed_files: list[str], allowed_ext: Optional[set]) -> tuple[list[str], list[str]]:
-    """将改动文件按后缀过滤,分为匹配和不匹配两组。
-
-    如果 allowed_ext 为 None,所有文件都视为匹配。
-    匹配规则:文件后缀必须在 allowed_ext 集合中(含前置点,如 {'.py', '.ts'})。
-
-    Returns:
-        (matching_files, non_matching_files) - 匹配的文件列表和不匹配的文件列表
-    """
-    if not allowed_ext:
-        return changed_files, []
-
-    matching = []
-    non_matching = []
-    for f in changed_files:
-        _, ext = os.path.splitext(f)
-        if ext in allowed_ext:
-            matching.append(f)
-        else:
-            non_matching.append(f)
-    return matching, non_matching
 
 
 # ─── 日志记录辅助 ──────────────────────────────────────────────────────
@@ -245,119 +209,6 @@ def write_round_log(
         f.write("\n".join(lines) + "\n")
 
 
-# ─── 交互式审核 ──────────────────────────────────────────────────────
-
-def _interactive_review(target_dir: str) -> str:
-    """在 git commit 之前展示 unified diff 并等待用户确认。
-
-    Returns:
-        'commit' - 用户确认提交
-        'skip'   - 用户拒绝提交,改动保留在工作区
-        'discard' - 用户选择丢弃所有改动(git checkout)
-    """
-    try:
-        r = subprocess.run(
-            ["git", "-C", target_dir, "diff"],
-            capture_output=True, text=True, timeout=10,
-        )
-        diff_output = r.stdout
-    except Exception as e:
-        logger.warning(f"无法获取 git diff: {e}")
-        return "commit"
-
-    # 如果没有 unstaged diff,尝试 staged diff
-    if not diff_output.strip():
-        try:
-            r = subprocess.run(
-                ["git", "-C", target_dir, "diff", "--cached"],
-                capture_output=True, text=True, timeout=10,
-            )
-            diff_output = r.stdout
-        except Exception:
-            pass
-
-    if not diff_output.strip():
-        logger.info("无可审查的改动(空 diff)")
-        return "commit"
-
-    print(f"\n{'=' * 60}")
-    print("  [Review] AI 生成的改动预览 (git diff)")
-    print(f"{'=' * 60}")
-    print(diff_output)
-    print(f"{'=' * 60}")
-
-    while True:
-        try:
-            response = input("  Commit changes? [y/N/d] (d=discard all): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return "skip"
-
-        if response in ("", "n"):
-            print("  [Review] 已跳过提交,改动保留在工作区")
-            return "skip"
-        elif response == "y":
-            print("  [Review] 用户确认,继续提交")
-            return "commit"
-        elif response == "d":
-            print("  [Review] 丢弃所有改动...")
-            try:
-                subprocess.run(
-                    ["git", "-C", target_dir, "checkout", "--", "."],
-                    capture_output=True, timeout=30,
-                )
-                print("  [Review] 已丢弃所有改动")
-            except Exception as e:
-                logger.warning(f"丢弃改动失败: {e}")
-            return "discard"
-        else:
-            print("  请输入 y (确认), n (跳过), 或 d (丢弃)")
-
-
-# ─── 改动前快照 ────────────────────────────────────────────────────
-
-def _take_pre_snapshot(target_dir: str) -> dict:
-    """在调用 Agent 之前拍摄文件状态快照，用于回滚时精确清理新增文件。
-
-    返回:
-        dict with keys:
-            tracked_files: list[str] — git ls-files 输出
-            untracked_files: list[str] — git ls-files --others --exclude-standard
-            staged_files: list[str] — git diff --cached --name-only
-    """
-    snapshot: dict = {
-        "tracked_files": [],
-        "untracked_files": [],
-        "staged_files": [],
-    }
-    try:
-        r = subprocess.run(
-            ["git", "-C", target_dir, "ls-files"],
-            capture_output=True, text=True, timeout=10,
-        )
-        snapshot["tracked_files"] = [f for f in r.stdout.splitlines() if f.strip()]
-    except Exception:
-        pass
-
-    try:
-        r = subprocess.run(
-            ["git", "-C", target_dir, "ls-files", "--others", "--exclude-standard"],
-            capture_output=True, text=True, timeout=10,
-        )
-        snapshot["untracked_files"] = [f for f in r.stdout.splitlines() if f.strip()]
-    except Exception:
-        pass
-
-    try:
-        r = subprocess.run(
-            ["git", "-C", target_dir, "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, timeout=10,
-        )
-        snapshot["staged_files"] = [f for f in r.stdout.splitlines() if f.strip()]
-    except Exception:
-        pass
-
-    return snapshot
 
 
 # ─── 单轮执行 ─────────────────────────────────────────────────────────
@@ -367,58 +218,42 @@ def _execute_single_round(
     agent: str,
     round_num: int,
     prompt: str,
-    allowed_ext: Optional[set],
     no_backup: bool,
-    no_git: bool,
     timeout: int,
     agent_args: Optional[list],
-    ext_filter: Optional[str],
     keep_backups: int,
     summary_prefix: str = "",
     error_label: str = "Agent 返回异常",
     defer_commit: bool = False,
-    auto_test: bool = True,
-    test_command_override: Optional[str] = None,
-    review: bool = False,
 ) -> dict:
-    """执行单轮迭代的核心逻辑:备份、调用 Agent、检测改动、过滤、记录日志、Git 提交。
-
-    此函数封装了 run_loop(任务模式)和 _run_legacy_loop(逐轮模式)共用的
-    重复代码,两个循环只保留差异化的调度逻辑(prompt 构建、任务标记、prev_summary 维护)。
+    """执行单轮迭代的核心逻辑：备份、调用 Agent、检测改动、记录日志、Git 提交。
 
     Args:
-        summary_prefix: 写入 changelog 时加在 summary 前面的前缀(如 "[任务#1] ")
-        error_label: Agent 异常且无改动时的日志描述(如 "跳过任务 #1" 或 "等待后继续...")
-        auto_test: 是否自动检测并运行测试命令（失败则精确回滚 + 记录）
-        test_command_override: 手动指定的测试命令，跳过自动检测
+        summary_prefix: 写入 changelog 时加在 summary 前面的前缀（如 "[任务#1] "）
+        error_label: Agent 异常且无改动时的日志描述
 
     Returns:
         dict with keys:
             success: Agent 是否正常退出
-            summary: 本轮改动说明(可能已追加后缀过滤警告)
+            summary: 本轮改动说明
             changed_files: 改动的文件列表
-            elapsed: Agent 执行耗时(秒)
-            has_diff: 是否有文件改动(Agent 异常且无改动时为 False)
+            elapsed: Agent 执行耗时（秒）
+            has_diff: 是否有文件改动（Agent 异常且无改动时为 False）
     """
-    git_repo = is_git_repo(target_dir) and not no_git
+    git_repo = is_git_repo(target_dir)
 
-    # ── 备份 ──(git 仓库已有版本历史,无需全量备份)
+    # ── 备份 ──（git 仓库已有版本历史，无需全量备份）
     if not no_backup and not git_repo:
         backup_folder = backup_all(target_dir, round_num)
         if backup_folder:
-            print(f"  💾 已备份到: {backup_folder}")
+            print(f"  \U0001f4be 已备份到: {backup_folder}")
         if keep_backups > 0:
             cleanup_old_backups(target_dir, keep_backups)
     before_ts = time.time()
 
-    # ── 改动前快照（用于精确回滚）──
-    pre_snapshot = None
-    if auto_test and git_repo:
-        pre_snapshot = _take_pre_snapshot(target_dir)
-
     # ── 调用 Agent ──
     success, summary, raw_output, elapsed = call_agent(
-        agent, prompt, target_dir, ext_filter, timeout, agent_args,
+        agent, prompt, target_dir, None, timeout, agent_args,
         quiet=True,
     )
 
@@ -438,74 +273,21 @@ def _execute_single_round(
     if not success and has_diff:
         logger.warning("Agent 返回异常但仍有文件改动,继续处理...")
 
-    # ── 扩展名过滤与日志记录 ──
     if has_diff:
-        filtered_files, bad_files = check_ext_filter(changed_files, allowed_ext)
-        if bad_files:
-            logger.warning(
-                f"Agent 修改了 {len(bad_files)} 个非目标后缀文件: "
-                f"{', '.join(bad_files[:5])}"
-                f"{' ...' if len(bad_files) > 5 else ''}"
-            )
-            suffix_note = f" [注意: Agent 同时修改了 {len(bad_files)} 个非目标后缀文件]"
-            summary = summary + suffix_note
-
-        # ── 记录 changelog ──
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
 
-        # ── 自动测试与回滚 ──
-        if auto_test and has_diff:
-            test_cmd = detect_test_command(target_dir, test_command_override)
-            if test_cmd is not None:
-                print(f"  \u25b6 运行测试: {' '.join(test_cmd)}")
-                test_result = run_test_command(target_dir, test_cmd)
-                if test_result["success"]:
-                    logger.info("测试通过")
-                    print(f"  \u2713 测试通过")
-                else:
-                    # 测试失败 → 精确回滚 + 记录
-                    logger.warning(f"测试失败: {test_result.get('error', '') or '测试未通过'}")
-                    rollback_and_record(
-                        target_dir=target_dir,
-                        changed_files=changed_files,
-                        test_command=test_cmd,
-                        test_output=test_result["output"],
-                        round_num=round_num,
-                        summary=f"{summary_prefix}{summary}",
-                        pre_snapshot=pre_snapshot,
-                    )
-                    changed_files = []
-                    has_diff = False
-            else:
-                logger.info("未检测到测试框架，跳过测试")
-
         # ── Git 提交 ──        
-        if git_repo and not defer_commit and has_diff:
-            should_commit = True
-            if review and has_diff:
-                decision = _interactive_review(target_dir)
-                if decision == "discard":
-                    changed_files = []
-                    has_diff = False
-                    should_commit = False
-                elif decision == "skip":
-                    should_commit = False
-
-            if should_commit:
-                diff_stat = get_git_diff_summary(target_dir)
-                git_commit(target_dir, round_num, summary)
-                if diff_stat:
-                    print(f"  ✓ 改动: {diff_stat}")
-                else:
-                    print(f"  ✓ 已提交改动")
-            elif review and not has_diff:
-                print(f"  - 改动已丢弃")
-            elif review:
-                print(f"  - 改动保留在工作区(未提交)")
+        if git_repo and not defer_commit:
+            diff_stat = get_git_diff_summary(target_dir)
+            git_commit(target_dir, round_num, summary)
+            if diff_stat:
+                print(f"  \u2713 改动: {diff_stat}")
+            else:
+                print(f"  \u2713 已提交改动")
         else:
-            print(f"  ✓ 修改了 {len(changed_files)} 个文件")
+            print(f"  \u2713 修改了 {len(changed_files)} 个文件")
 
-        print(f"  📄 {', '.join(changed_files[:5])}"
+        print(f"  \U0001f4c4 {', '.join(changed_files[:5])}"
                f"{' ...' if len(changed_files) > 5 else ''}")
     else:
         logger.info(f"本轮无文件改动 - {summary}")
@@ -520,51 +302,37 @@ def run_loop(
     target_dir: str,
     agent: str,
     max_rounds: int = 10,
-    allowed_ext: Optional[set] = None,
     no_backup: bool = False,
-    no_git: bool = False,
     sleep_between: float = 2.0,
     timeout: int = 600,
     agent_args: Optional[list] = None,
     keep_backups: int = 0,
-    no_plan: bool = False,
     replan: bool = False,
-    tasks_per_run: int = 0,
     dry_run: bool = False,
-    auto_test: bool = True,
-    test_command: Optional[str] = None,
-    review: bool = False,
 ):
     print()
     print("╔═══════════════════════════════════════════════╗")
-    print("║      AI 自迭代控制器 v2.4 (auto-test)        ║")
+    print("║           AI 自迭代控制器 v3.0               ║")
     print("╚═══════════════════════════════════════════════╝")
     print()
     print(f"  目标目录 : {target_dir}")
     print(f"  Agent    : {agent}")
     print(f"  超时     : {timeout}s")
     print(f"  最大轮次 : {'无限' if max_rounds == 0 else max_rounds}")
-    if allowed_ext:
-        print(f"  文件过滤 : {', '.join(sorted(allowed_ext))}")
-    git_repo_for_display = is_git_repo(target_dir) and not no_git
+
+    git_repo_for_display = is_git_repo(target_dir)
     if not no_backup and not git_repo_for_display:
         print(f"  备份目录 : {BACKUP_DIR_NAME}/")
         if keep_backups > 0:
             print(f"  备份保留 : 最近 {keep_backups} 个")
     elif not no_backup and git_repo_for_display:
         print(f"  备份     : 跳过(Git 仓库已有版本历史)")
-    if is_git_repo(target_dir) and not no_git:
+    if is_git_repo(target_dir):
         print(f"  Git      : 自动 commit")
-    if auto_test:
-        print(f"  测试     : 自动检测 + 失败回滚")
-    else:
-        print(f"  测试     : 已禁用")
-    if review:
-        print(f"  审核     : 交互式 diff 审核(y/N/d)")
-    if no_plan:
-        print(f"  模式     : 逐轮模式(无任务列表)")
-    if tasks_per_run > 0:
-        print(f"  任务限制 : 每次最多 {tasks_per_run} 个")
+
+
+
+
     if dry_run:
         print(f"  模式     : 预览模式(不实际修改任何文件)")
     print()
@@ -572,7 +340,6 @@ def run_loop(
     # 自动管理 .gitignore：将生成的文件路径追加到目标仓库的忽略列表
     ensure_gitignore(target_dir)
 
-    ext_filter = build_ext_filter_arg(agent, allowed_ext)
     model_hint = extract_model_hint(agent_args)
     init_log(target_dir, agent, model_hint)
     if model_hint:
@@ -580,7 +347,7 @@ def run_loop(
 
     # 检查工作区是否有未提交的改动,如有则自动 stash 隔离
     stashed = False
-    if is_git_repo(target_dir) and not no_git and has_changes(target_dir):
+    if is_git_repo(target_dir) and has_changes(target_dir):
         logger.info("工作区存在未提交的改动,自动 stash 隔离...")
         stashed = git_stash_push(target_dir)
         if stashed:
@@ -588,23 +355,7 @@ def run_loop(
         else:
             logger.warning("自动 stash 失败,用户改动可能与 AI 改动混合记录")
 
-    # ─── 逐轮模式(--no-plan):保持精简行为 ───
-    if no_plan:
-        write_run_header(target_dir, 1)
-        _run_legacy_loop(
-            target_dir, agent, max_rounds, allowed_ext,
-            no_backup, no_git, sleep_between, timeout,
-            agent_args, keep_backups, ext_filter,
-            dry_run=dry_run,
-            auto_test=auto_test,
-            test_command_override=test_command,
-            review=review,
-        )
-        if stashed:
-            git_stash_pop(target_dir)
-        return
-
-    # ─── 任务列表模式:自动恢复 + 可选重新规划 ───
+    # ─── 任务列表模式：自动恢复 + 可选重新规划 ───
 
     tasks = None
     metadata = {}
@@ -647,19 +398,9 @@ def run_loop(
             metadata = load_task_metadata(target_dir)
             logger.info("预览模式: 加载已有任务列表,跳过规划阶段 Agent 调用")
         if tasks is None:
-            tasks = generate_task_list(agent, target_dir, ext_filter, timeout, agent_args)
+            tasks = generate_task_list(agent, target_dir, None, timeout, agent_args)
         if tasks is None:
-            logger.warning("任务列表生成失败,回退到逐轮模式")
-            write_run_header(target_dir, 1)
-            _run_legacy_loop(
-                target_dir, agent, max_rounds, allowed_ext,
-                no_backup, no_git, sleep_between, timeout,
-                agent_args, keep_backups, ext_filter,
-                dry_run=dry_run,
-                auto_test=auto_test,
-                test_command_override=test_command,
-                review=review,
-            )
+            logger.error("任务列表生成失败，退出。")
             if stashed:
                 git_stash_pop(target_dir)
             return
@@ -702,9 +443,8 @@ def run_loop(
     # ─── 阶段 2:逐条执行任务 ───
     round_num = global_round
     consecutive_noops = 0
-    current_task_id = None  # 追踪当前任务,用于跨任务重置计数器
-    tasks_done_this_run = 0
-    git_repo = is_git_repo(target_dir) and not no_git
+    current_task_id = None
+    git_repo = is_git_repo(target_dir)
 
     while True:
         # 获取下一个待执行任务(从内存缓存查找,避免重复解析文件)
@@ -716,14 +456,6 @@ def run_loop(
             consecutive_noops = 0
         if task is None:
             logger.info("所有任务已完成!")
-            break
-
-        # 单次运行任务数限制
-        if tasks_per_run > 0 and tasks_done_this_run >= tasks_per_run:
-            pending_left = sum(1 for t in tasks if t.get("status") != "done")
-            logger.info(
-                f"本次运行已处理 {tasks_per_run} 个任务(剩余 {pending_left} 个待执行),退出。"
-            )
             break
 
         round_num += 1
@@ -748,7 +480,6 @@ def run_loop(
             if git_repo:
                 git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
             consecutive_noops = 0
-            tasks_done_this_run += 1
             time.sleep(sleep_between)
             continue
 
@@ -762,15 +493,11 @@ def run_loop(
         # 构建任务 prompt 并执行单轮
         prompt = build_task_prompt(task)
         result = _execute_single_round(
-            target_dir, agent, round_num, prompt, allowed_ext,
-            no_backup, no_git, timeout, agent_args, ext_filter,
-            keep_backups,
+            target_dir, agent, round_num, prompt,
+            no_backup, timeout, agent_args, keep_backups,
             summary_prefix=f"[任务#{tid}] ",
             error_label=f"跳过任务 #{tid}",
             defer_commit=True,
-            auto_test=auto_test,
-            test_command_override=test_command,
-            review=review,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -779,30 +506,13 @@ def run_loop(
             time.sleep(sleep_between)
             continue
 
-        # Agent 成功或有改动:标记任务完成
         mark_task_done(target_dir, task["id"], round_num, tasks,
                        run_count=run_count, last_run=last_run,
                        global_round=round_num)
-        if result["has_diff"]:
-            consecutive_noops = 0
-        else:
-            # Agent 成功但无改动 -- 任务天然无需改动,重置计数器
-            consecutive_noops = 0
-        tasks_done_this_run += 1
+        consecutive_noops = 0
 
-        # Agent 成功或有改动:统一提交(含 AI-TASKS.md 状态更新)
         if git_repo:
-            should_commit = True
-            if review and result["has_diff"]:
-                decision = _interactive_review(target_dir)
-                if decision == "discard":
-                    result["has_diff"] = False
-                    result["changed_files"] = []
-                    should_commit = False
-                elif decision == "skip":
-                    should_commit = False
-            if should_commit:
-                git_commit(target_dir, round_num, result["summary"])
+            git_commit(target_dir, round_num, result["summary"])
 
         print(f"  ⏳ 等待 {sleep_between}s...")
         time.sleep(sleep_between)
@@ -816,106 +526,17 @@ def run_loop(
         git_stash_pop(target_dir)
 
 
-def _run_legacy_loop(
-    target_dir: str,
-    agent: str,
-    max_rounds: int,
-    allowed_ext: Optional[set],
-    no_backup: bool,
-    no_git: bool,
-    sleep_between: float,
-    timeout: int,
-    agent_args: Optional[list],
-    keep_backups: int,
-    ext_filter: Optional[str],
-    dry_run: bool = False,
-    auto_test: bool = True,
-    test_command_override: Optional[str] = None,
-    review: bool = False,
-):
-    """原有的逐轮模式:每轮让 AI 自己选一件事来做。
-
-    不支持跨运行恢复,每次启动都从第 1 轮开始。
-    """
-    consecutive_noops = 0
-    round_num = 0
-    prev_summary = ""
-
-    while True:
-        round_num += 1
-
-        if max_rounds > 0 and round_num > max_rounds:
-            logger.info(f"达到最大轮次 {max_rounds},退出。")
-            print(f"\n✓ 达到最大轮次 {max_rounds},退出。")
-            break
-
-        if consecutive_noops >= 3:
-            logger.info(f"连续 {consecutive_noops} 轮无改动,代码已稳定,退出。")
-            print(f"\n✓ 连续 {consecutive_noops} 轮无改动,代码已稳定,退出。")
-            break
-
-        print(f"\n{'─' * 55}")
-        print(f"  第 {round_num} 轮迭代{' (无限)' if max_rounds == 0 else f' / {max_rounds}'}")
-        print(f"{'─' * 55}")
-
-        # 构建每轮通用 prompt
-        parts = [TASK_PROMPT]
-        round_info = f"\n\n## 当前迭代上下文\n\n这是第 {round_num} 轮"
-        if max_rounds > 0:
-            round_info += f" / 共 {max_rounds} 轮"
-        round_info += "。扫描代码库,找出优先级最高的一个改进点并实现它。"
-        parts.append(round_info)
-        if prev_summary:
-            parts.append(
-                f"\n上一轮 AI 完成的改动: {prev_summary}\n"
-                f"请不要再做相同的改动,继续寻找新的改进点。"
-            )
-        prompt = "\n".join(parts)
-
-        # ─── 预览模式:只打印计划,不实际执行 ───
-        if dry_run:
-            _print_dry_run_round(agent, round_num, prompt, agent_args, ext_filter, target_dir)
-            consecutive_noops = 0
-            continue
-
-        result = _execute_single_round(
-            target_dir, agent, round_num, prompt, allowed_ext,
-            no_backup, no_git, timeout, agent_args, ext_filter,
-            keep_backups,
-            error_label="等待后继续...",
-            auto_test=auto_test,
-            test_command_override=test_command_override,
-            review=review,
-        )
-
-        if not result["success"] and not result["has_diff"]:
-            consecutive_noops += 1
-            prev_summary = ""
-            time.sleep(sleep_between)
-            continue
-
-        if result["has_diff"]:
-            prev_summary = result["summary"]
-            consecutive_noops = 0
-        else:
-            consecutive_noops += 1
-            prev_summary = ""
-
-        print(f"  ⏳ 等待 {sleep_between}s...")
-        time.sleep(sleep_between)
-
-
 # ─── 预览模式辅助函数 ──────────────────────────────────────────────────
 
 def _build_dry_run_command(agent: str, prompt: str, agent_args: Optional[list],
-                           ext_filter: Optional[str], target_dir: str) -> str:
+                           target_dir: str) -> str:
     """构建预览模式下展示的等价命令行,供用户参考。
 
     复用 build_agent_command 构造命令列表,仅将最后一个参数(prompt)
     用 shlex.quote 包裹后拼接为可复制的字符串。
     """
     cmd_parts, _ = build_agent_command(
-        agent, prompt, target_dir, agent_args, ext_filter,
+        agent, prompt, target_dir, agent_args, None,
     )
     # prompt 作为最后一个参数,quote 以安全展示
     cmd_parts[-1] = shlex.quote(cmd_parts[-1])
@@ -923,7 +544,7 @@ def _build_dry_run_command(agent: str, prompt: str, agent_args: Optional[list],
 
 
 def _print_dry_run_round(agent: str, round_num: int, prompt: str,
-                         agent_args: Optional[list], ext_filter: Optional[str],
+                         agent_args: Optional[list],
                          target_dir: str):
     """预览模式:打印单轮的详细执行计划,不实际调用 Agent。"""
     print(f"\n  ╔{'═' * 51}╗")
@@ -939,7 +560,7 @@ def _print_dry_run_round(agent: str, round_num: int, prompt: str,
         print(f"     ...(共 {len(prompt)} 字符,已截断显示)")
 
     print(f"\n  🔧 计划执行的等价命令:")
-    cmd = _build_dry_run_command(agent, prompt, agent_args, ext_filter, target_dir)
+    cmd = _build_dry_run_command(agent, prompt, agent_args, target_dir)
     print(f"     {cmd}")
 
     print(f"\n  ⚡ 实际操作: 跳过 Agent 调用、备份、Git 提交")
@@ -998,8 +619,6 @@ def main():
               python ai_controller.py ./my-project --agent pi --max-rounds 10    # 先规划再执行,自动恢复
               python ai_controller.py ./my-project --agent pi --replan           # 重新生成任务列表
               python ai_controller.py ./my-project --agent pi --plan-only        # 仅生成任务列表
-              python ai_controller.py ./my-project --agent pi --no-plan          # 传统逐轮模式
-              python ai_controller.py ./my-project --agent pi --tasks-per-run 3  # 每次最多处理 3 个任务
         """),
     )
     parser.add_argument("directory", help="目标代码目录")
@@ -1007,38 +626,25 @@ def main():
                         help="使用的 Agent 工具 (默认 pi)")
     parser.add_argument("--max-rounds", type=int, default=10,
                         help="最大迭代轮数,0=无限 (默认 10)")
-    parser.add_argument("--ext", default="",
-                        help="只处理指定后缀,逗号分隔,如 .py,.ts,.js")
+
     parser.add_argument("--timeout", type=int, default=600,
                         help="Agent 单轮超时秒数 (默认 600)")
     parser.add_argument("--sleep", type=float, default=2.0,
                         help="每轮间隔秒数 (默认 2.0)")
     parser.add_argument("--no-backup", action="store_true",
                         help="强制不备份(危险!若为 git 仓库则自动跳过备份)")
-    parser.add_argument("--no-git", action="store_true",
-                        help="不自动 git commit")
     parser.add_argument("--agent-args", default="",
                         help="传递给 Agent 的额外参数,用引号包裹,如 --agent-args '--model gpt-4'")
     parser.add_argument("--keep-backups", type=int, default=0,
                         help="只保留最近 N 个备份,旧备份自动清理(0=不限制,默认 0)")
-    parser.add_argument("--no-plan", action="store_true",
-                        help="跳过任务列表规划阶段,使用传统逐轮模式(每轮 AI 自行选择改进点)")
+
     parser.add_argument("--plan-only", action="store_true",
                         help="只生成任务列表 AI-TASKS.md,不执行")
     parser.add_argument("--replan", action="store_true",
                         help="强制重新生成任务列表(备份旧 AI-TASKS.md 为 .bak)")
-    parser.add_argument("--tasks-per-run", type=int, default=0,
-                        help="每次运行最多处理 N 个任务后退出,0=不限制 (默认 0)")
+
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式:跳过 Agent 调用和文件修改,只打印每轮要执行的任务描述和命令")
-    parser.add_argument("--auto-test",
-                        action=argparse.BooleanOptionalAction,
-                        default=True, dest="auto_test",
-                        help="自动检测并运行测试命令，失败则精确回滚 (默认启用，使用 --no-auto-test 禁用)")
-    parser.add_argument("--test-command", type=str, default=None,
-                        help="手动指定测试命令，跳过自动检测 (如 'npm test')")
-    parser.add_argument("--review", action="store_true",
-                        help="交互式审核模式: commit 前展示 unified diff 并等待用户确认")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -1073,9 +679,6 @@ def main():
     if args.keep_backups < 0:
         logger.error(f"--keep-backups 不能为负数(0=不限制),当前值: {args.keep_backups}")
         sys.exit(1)
-    if args.tasks_per_run < 0:
-        logger.error(f"--tasks-per-run 不能为负数(0=不限制),当前值: {args.tasks_per_run}")
-        sys.exit(1)
 
     # 检查 agent 是否可用
     agent_cmd = AGENTS[args.agent]["cmd"]
@@ -1088,31 +691,19 @@ def main():
     if args.agent_args:
         agent_args = shlex.split(args.agent_args)
 
-    # 解析后缀
-    allowed_ext = None
-    if args.ext:
-        allowed_ext = set()
-        for e in args.ext.split(","):
-            e = e.strip()
-            if e and not e.startswith("."):
-                e = "." + e
-            if e:
-                allowed_ext.add(e)
-
     # --plan-only:只生成任务列表
     if args.plan_only:
         print()
         print("╔══════════════════════════════════════════╗")
-        print("║      AI 自迭代控制器 v2.4 (仅规划)       ║")
+        print("║           AI 自迭代控制器 v3.0 (仅规划)     ║")
         print("╚══════════════════════════════════════════╝")
         print()
-        ext_filter = build_ext_filter_arg(args.agent, allowed_ext)
 
         # 如果 --replan --plan-only,备份旧文件再生成
         if args.replan:
             backup_task_file(str(target))
 
-        tasks = generate_task_list(args.agent, str(target), ext_filter, args.timeout, agent_args)
+        tasks = generate_task_list(args.agent, str(target), None, args.timeout, agent_args)
         if tasks is None:
             logger.error("规划失败,未能生成任务列表。")
             sys.exit(1)
@@ -1129,20 +720,13 @@ def main():
             target_dir=str(target),
             agent=args.agent,
             max_rounds=args.max_rounds,
-            allowed_ext=allowed_ext,
             no_backup=args.no_backup,
-            no_git=args.no_git,
             sleep_between=args.sleep,
             timeout=args.timeout,
             agent_args=agent_args,
             keep_backups=args.keep_backups,
-            no_plan=args.no_plan,
             replan=args.replan,
-            tasks_per_run=args.tasks_per_run,
             dry_run=args.dry_run,
-            auto_test=args.auto_test,
-            test_command=args.test_command,
-            review=args.review,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")

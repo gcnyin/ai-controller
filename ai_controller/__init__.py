@@ -7,8 +7,6 @@
     tasks      - 任务列表管理（生成/加载/保存/标记）
     backup     - 备份管理（backup_all, cleanup_old_backups）
     git_ops    - Git 操作（is_git_repo, has_changes, git_commit 等）
-    validation - 质量验证与回滚（run_test_command, rollback_and_record）
-    test_detector - 测试命令自动发现（detect_test_command）
     cli        - CLI 入口与主循环（main, run_loop 等）
 
 向后兼容：所有公开 API 及测试所需的私有函数均在包级别重新导出。
@@ -46,11 +44,6 @@ from .tasks import (
     _json_loads_clean,
 )
 from .backup import BACKUP_DIR_NAME, backup_all, cleanup_old_backups
-from .validation import (
-    run_test_command,
-    rollback_and_record,
-)
-from .test_detector import detect_test_command
 from .git_ops import (
     is_git_repo,
     has_changes,
@@ -64,12 +57,9 @@ from .config import load_config, CONFIG_FILE_NAMES
 from .cli import (
     main,
     run_loop,
-    build_ext_filter_arg,
-    check_ext_filter,
     ensure_gitignore,
     extract_model_hint,
     init_log,
     write_run_header,
     write_round_log,
-    _take_pre_snapshot,
 )

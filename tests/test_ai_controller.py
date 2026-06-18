@@ -226,67 +226,6 @@ class TestExtractJsonTasks:
 # check_ext_filter
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestCheckExtFilter:
-    """测试文件后缀过滤逻辑。"""
-
-    def test_no_filter_passes_all(self):
-        """无过滤条件时，所有文件匹配。"""
-        files = ["a.py", "b.ts", "c.md", "README"]
-        matching, non_matching = ac.check_ext_filter(files, None)
-        assert matching == files
-        assert non_matching == []
-
-    def test_filter_matching_only(self):
-        """只保留指定后缀文件。"""
-        allowed = {".py", ".ts"}
-        files = ["src/main.py", "src/utils.py", "src/app.ts", "README.md", "package.json"]
-        matching, non_matching = ac.check_ext_filter(files, allowed)
-        assert sorted(matching) == ["src/app.ts", "src/main.py", "src/utils.py"]
-        assert sorted(non_matching) == ["README.md", "package.json"]
-
-    def test_no_files_match_filter(self):
-        """无文件匹配过滤条件。"""
-        allowed = {".rs"}
-        files = ["main.py", "lib.js"]
-        matching, non_matching = ac.check_ext_filter(files, allowed)
-        assert matching == []
-        assert sorted(non_matching) == ["lib.js", "main.py"]
-
-    def test_empty_file_list(self):
-        """空文件列表。"""
-        allowed = {".py"}
-        matching, non_matching = ac.check_ext_filter([], allowed)
-        assert matching == []
-        assert non_matching == []
-
-    def test_all_match(self):
-        """全部匹配。"""
-        allowed = {".py"}
-        files = ["a.py", "b.py", "c/d/e.py"]
-        matching, non_matching = ac.check_ext_filter(files, allowed)
-        assert matching == files
-        assert non_matching == []
-
-    def test_empty_allowed_set_means_no_filter(self):
-        """空集合等同于 None，全部视为匹配。"""
-        files = ["a.py", "b.md"]
-        matching, non_matching = ac.check_ext_filter(files, set())
-        assert matching == files
-        assert non_matching == []
-
-    def test_files_with_no_extension(self):
-        """无后缀文件。"""
-        allowed = {".py"}
-        files = ["Makefile", "Dockerfile", "main.py"]
-        matching, non_matching = ac.check_ext_filter(files, allowed)
-        assert matching == ["main.py"]
-        assert sorted(non_matching) == ["Dockerfile", "Makefile"]
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# save_task_list / load_task_list / load_task_metadata / mark_task_done
-# ═══════════════════════════════════════════════════════════════════════
-
 class TestTaskListIO:
     """测试任务列表的保存、加载、标记完成、获取待执行任务。"""
 
@@ -567,29 +506,6 @@ class TestExtractModelHint:
 
 # ═══════════════════════════════════════════════════════════════════════
 # build_ext_filter_arg
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestBuildExtFilterArg:
-    """测试构建文件过滤 prompt 参数。"""
-
-    def test_none_exts(self):
-        assert ac.build_ext_filter_arg("pi", None) is None
-
-    def test_empty_set(self):
-        assert ac.build_ext_filter_arg("pi", set()) is None
-
-    def test_single_extension(self):
-        result = ac.build_ext_filter_arg("pi", {".py"})
-        assert "只处理 .py 文件" in result
-        assert "忽略其他文件类型" in result
-
-    def test_multiple_extensions_sorted(self):
-        result = ac.build_ext_filter_arg("pi", {".ts", ".js", ".py"})
-        assert "只处理 .js, .py, .ts 文件" in result
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# build_task_prompt
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestBuildTaskPrompt:
@@ -910,17 +826,13 @@ class TestLoadConfig:
         toml_content = """\
 agent = "claude"
 max_rounds = 5
-ext = ".py,.ts"
 timeout = 300
 sleep = 1.5
 no_backup = true
-no_git = false
 agent_args = "--model gpt-4"
 keep_backups = 10
-no_plan = true
 plan_only = false
 replan = false
-tasks_per_run = 3
 dry_run = false
 """
         cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
@@ -929,17 +841,13 @@ dry_run = false
 
         assert config["agent"] == "claude"
         assert config["max_rounds"] == 5
-        assert config["ext"] == ".py,.ts"
         assert config["timeout"] == 300
         assert config["sleep"] == 1.5
         assert config["no_backup"] is True
-        assert config["no_git"] is False
         assert config["agent_args"] == "--model gpt-4"
         assert config["keep_backups"] == 10
-        assert config["no_plan"] is True
         assert config["plan_only"] is False
         assert config["replan"] is False
-        assert config["tasks_per_run"] == 3
         assert config["dry_run"] is False
 
     def test_toml_config_partial(self, tmp_workspace):
@@ -965,17 +873,13 @@ timeout = 900
         yaml_content = """\
 agent: claude
 max_rounds: 3
-ext: ".py"
 timeout: 120
 sleep: 3.0
 no_backup: true
-no_git: true
 agent_args: "-m claude-sonnet-4"
 keep_backups: 5
-no_plan: false
 plan_only: false
 replan: true
-tasks_per_run: 5
 dry_run: true
 """
         # 需要 PyYAML
@@ -986,16 +890,13 @@ dry_run: true
 
         assert config["agent"] == "claude"
         assert config["max_rounds"] == 3
-        assert config["ext"] == ".py"
         assert config["timeout"] == 120
         assert config["sleep"] == 3.0
         assert config["no_backup"] is True
-        assert config["no_git"] is True
         assert config["agent_args"] == "-m claude-sonnet-4"
         assert config["keep_backups"] == 5
         assert config["plan_only"] is False
         assert config["replan"] is True
-        assert config["tasks_per_run"] == 5
         assert config["dry_run"] is True
 
     def test_yaml_config_with_yml_extension(self, tmp_workspace):
@@ -1080,7 +981,6 @@ max_rounds = 42
 timeout = 1800
 sleep = 2.5
 keep_backups = 3
-tasks_per_run = 10
 """
         cfg_path = Path(tmp_workspace) / ".ai-controller.toml"
         cfg_path.write_text(toml_content, encoding="utf-8")
@@ -1094,8 +994,6 @@ tasks_per_run = 10
         assert config["sleep"] == 2.5
         assert isinstance(config["keep_backups"], int)
         assert config["keep_backups"] == 3
-        assert isinstance(config["tasks_per_run"], int)
-        assert config["tasks_per_run"] == 10
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1179,7 +1077,6 @@ class TestConsecutiveNoopsIsolation:
                                         agent="pi",
                                         max_rounds=10,
                                         no_backup=True,
-                                        no_git=True,
                                         sleep_between=0,
                                         timeout=10,
                                     )
@@ -1197,47 +1094,6 @@ class TestConsecutiveNoopsIsolation:
 # ═══════════════════════════════════════════════════════════════════════
 # validation — run_test_command
 # ═══════════════════════════════════════════════════════════════════════
-
-class TestRunTestCommand:
-    """测试 run_test_command —— 运行任意测试命令。"""
-
-    def test_success(self, tmp_workspace):
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.stdout = "All tests passed!\n"
-        mock_proc.stderr = ""
-
-        with patch("subprocess.run", return_value=mock_proc):
-            result = ac.run_test_command(tmp_workspace, ["npm", "test"])
-            assert result["success"] is True
-            assert result["error"] == ""
-            assert "All tests passed" in result["output"]
-
-    def test_failure(self, tmp_workspace):
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stdout = "FAIL: 1 test failed\n"
-        mock_proc.stderr = ""
-
-        with patch("subprocess.run", return_value=mock_proc):
-            result = ac.run_test_command(tmp_workspace, ["pytest"])
-            assert result["success"] is False
-            assert "退出码 1" in result["error"]
-
-    def test_command_not_found(self, tmp_workspace):
-        with patch("subprocess.run", side_effect=FileNotFoundError()):
-            result = ac.run_test_command(tmp_workspace, ["nonexistent"])
-            assert result["success"] is False
-            assert "命令未找到" in result["error"]
-
-    def test_timeout(self, tmp_workspace):
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
-            cmd=["test"], timeout=120,
-        )):
-            result = ac.run_test_command(tmp_workspace, ["test"])
-            assert result["success"] is False
-            assert "超时" in result["error"]
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # git_stash_push / git_stash_pop
@@ -1429,211 +1285,6 @@ class TestEnsureGitignore:
         assert lines.count("AI-CHANGELOG.md") == 1
         assert lines.count("ai-controller.log") == 1
         assert lines.count(".ai-controller-backups/") == 1
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# _execute_single_round — auto-test 自动测试与回滚
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestAutoTestRollback:
-    """测试 auto_test 测试失败时自动执行精确回滚。"""
-
-    def test_auto_test_failure_triggers_rollback(self, tmp_workspace):
-        """auto_test=True 且测试失败时，应执行精确回滚并返回无改动状态。"""
-        import ai_controller.cli as cli_module
-
-        # 创建 git 仓库并提交一个初始文件
-        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
-        init_file = Path(tmp_workspace) / "main.py"
-        init_file.write_text("# original content\n")
-        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
-
-        # Agent 修改了文件
-        init_file.write_text("x = 2\n")
-
-        # 模拟关键依赖
-        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
-        mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_detect_test = MagicMock(return_value=["python", "-m", "pytest", "-x", "-q"])
-        mock_run_test = MagicMock(return_value={
-            "success": False,
-            "output": "FAIL: 1 test failed\n",
-            "error": "退出码 1",
-        })
-        mock_rollback = MagicMock()
-        mock_take_snapshot = MagicMock(return_value={
-            "tracked_files": ["main.py"],
-            "untracked_files": [],
-            "staged_files": [],
-        })
-
-        with patch.object(cli_module, "call_agent", mock_call_agent):
-            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "detect_test_command", mock_detect_test):
-                    with patch.object(cli_module, "run_test_command", mock_run_test):
-                        with patch.object(cli_module, "rollback_and_record", mock_rollback):
-                            with patch.object(cli_module, "_take_pre_snapshot", mock_take_snapshot):
-                                result = cli_module._execute_single_round(
-                                    target_dir=tmp_workspace,
-                                    agent="pi",
-                                    round_num=1,
-                                    prompt="test prompt",
-                                    allowed_ext=None,
-                                    no_backup=True,
-                                    no_git=False,
-                                    timeout=10,
-                                    agent_args=None,
-                                    ext_filter=None,
-                                    keep_backups=0,
-                                    auto_test=True,
-                                    defer_commit=False,
-                                )
-
-        # 验证 rollback_and_record 被调用
-        mock_rollback.assert_called_once()
-        # 验证返回值反映无改动
-        assert result["has_diff"] is False
-        assert result["changed_files"] == []
-
-    def test_auto_test_passes_does_not_rollback(self, tmp_workspace):
-        """auto_test 测试通过时不应回滚。"""
-        import ai_controller.cli as cli_module
-
-        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
-        init_file = Path(tmp_workspace) / "main.py"
-        init_file.write_text("# original\n")
-        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
-        init_file.write_text("x = 2\n")
-
-        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
-        mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_detect_test = MagicMock(return_value=["python", "-m", "pytest"])
-        mock_run_test = MagicMock(return_value={
-            "success": True,
-            "output": "3 passed\n",
-            "error": "",
-        })
-        mock_rollback = MagicMock()
-
-        with patch.object(cli_module, "call_agent", mock_call_agent):
-            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "detect_test_command", mock_detect_test):
-                    with patch.object(cli_module, "run_test_command", mock_run_test):
-                        with patch.object(cli_module, "rollback_and_record", mock_rollback):
-                            with patch.object(cli_module, "_take_pre_snapshot",
-                                             MagicMock(return_value={"tracked_files": [], "untracked_files": [], "staged_files": []})):
-                                result = cli_module._execute_single_round(
-                                    target_dir=tmp_workspace,
-                                    agent="pi",
-                                    round_num=1,
-                                    prompt="test prompt",
-                                    allowed_ext=None,
-                                    no_backup=True,
-                                    no_git=False,
-                                    timeout=10,
-                                    agent_args=None,
-                                    ext_filter=None,
-                                    keep_backups=0,
-                                    auto_test=True,
-                                    defer_commit=False,
-                                )
-
-        mock_rollback.assert_not_called()
-        assert result["has_diff"] is True
-        assert "main.py" in result["changed_files"]
-
-    def test_no_auto_test_skips_testing(self, tmp_workspace):
-        """auto_test=False 时应跳过所有测试和回滚。"""
-        import ai_controller.cli as cli_module
-
-        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
-        init_file = Path(tmp_workspace) / "main.py"
-        init_file.write_text("# original\n")
-        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
-        init_file.write_text("x = 2\n")
-
-        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
-        mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_detect_test = MagicMock()
-        mock_rollback = MagicMock()
-
-        with patch.object(cli_module, "call_agent", mock_call_agent):
-            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "detect_test_command", mock_detect_test):
-                    with patch.object(cli_module, "rollback_and_record", mock_rollback):
-                        with patch.object(cli_module, "_take_pre_snapshot",
-                                         MagicMock(return_value={})):
-                            result = cli_module._execute_single_round(
-                                target_dir=tmp_workspace,
-                                agent="pi",
-                                round_num=1,
-                                prompt="test prompt",
-                                allowed_ext=None,
-                                no_backup=True,
-                                no_git=False,
-                                timeout=10,
-                                agent_args=None,
-                                ext_filter=None,
-                                keep_backups=0,
-                                auto_test=False,
-                                defer_commit=False,
-                            )
-
-        mock_detect_test.assert_not_called()
-        mock_rollback.assert_not_called()
-        assert result["has_diff"] is True
-
-    def test_auto_test_no_test_framework(self, tmp_workspace):
-        """未检测到测试框架时不应回滚，也不应报错。"""
-        import ai_controller.cli as cli_module
-
-        subprocess.run(["git", "init"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_workspace, capture_output=True)
-        init_file = Path(tmp_workspace) / "main.py"
-        init_file.write_text("# original\n")
-        subprocess.run(["git", "add", "."], cwd=tmp_workspace, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_workspace, capture_output=True)
-        init_file.write_text("x = 2\n")
-
-        mock_call_agent = MagicMock(return_value=(True, "改动 main.py", "mock output", 1.0))
-        mock_get_changed_files = MagicMock(return_value=["main.py"])
-        mock_detect_test = MagicMock(return_value=None)
-        mock_rollback = MagicMock()
-
-        with patch.object(cli_module, "call_agent", mock_call_agent):
-            with patch.object(cli_module, "get_changed_files", mock_get_changed_files):
-                with patch.object(cli_module, "detect_test_command", mock_detect_test):
-                    with patch.object(cli_module, "rollback_and_record", mock_rollback):
-                        with patch.object(cli_module, "_take_pre_snapshot",
-                                         MagicMock(return_value={})):
-                            result = cli_module._execute_single_round(
-                                target_dir=tmp_workspace,
-                                agent="pi",
-                                round_num=1,
-                                prompt="test prompt",
-                                allowed_ext=None,
-                                no_backup=True,
-                                no_git=False,
-                                timeout=10,
-                                agent_args=None,
-                                ext_filter=None,
-                                keep_backups=0,
-                                auto_test=True,
-                                defer_commit=False,
-                            )
-
-        mock_rollback.assert_not_called()
-        assert result["has_diff"] is True
 
 
 # ═══════════════════════════════════════════════════════════════════════
