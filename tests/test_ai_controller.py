@@ -1670,3 +1670,68 @@ class TestExecuteTaskWithRetry:
         assert result["final_test_passed"] is None
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# _truncate_test_output
+# ═══════════════════════════════════════════════════════════════════════
+
+from ai_controller.prompts import _truncate_test_output  # noqa: E402
+
+
+class TestTruncateTestOutput:
+    """测试 _truncate_test_output 截断逻辑。
+
+    将 prompts.py __main__ 自检中的 4 个断言迁移为 pytest 用例，
+    并增加边界条件覆盖。
+    """
+
+    def test_short_output_unchanged(self):
+        """短输出不触发任何截断，原样返回。"""
+        short = "line1\nline2"
+        assert _truncate_test_output(short) == short
+
+    def test_many_lines_truncated(self):
+        """超出行数限制时，仅保留尾部 max_lines 行并附加截断提示。"""
+        many_lines = "\n".join(f"line{i}" for i in range(100))
+        result = _truncate_test_output(many_lines, max_lines=50, max_chars=10000)
+        assert "[... 输出已截断" in result
+        assert result.count("\n") <= 51
+
+    def test_long_content_truncated(self):
+        """超出字符数限制时，仅保留尾部 max_chars 个字符并附加截断提示。"""
+        long_content = "x" * 5000
+        result = _truncate_test_output(long_content, max_lines=50, max_chars=4000)
+        assert "[... 输出已截断" in result
+        assert len(result) <= 4000 + 200
+
+    def test_empty_string(self):
+        """空字符串输入输出均为空字符串。"""
+        assert _truncate_test_output("") == ""
+
+    def test_single_line_exceeds_max_chars(self):
+        """单行输出超过 max_chars 时，字符级截断生效。"""
+        single_line = "A" * 500
+        result = _truncate_test_output(single_line, max_lines=50, max_chars=200)
+        assert "[... 输出已截断" in result
+        # 截断后纯内容不超过 max_chars，加上截断提示后长度在合理范围
+        content_after_note = result.split("\n\n", 1)[-1]
+        assert len(content_after_note) == 200
+
+    def test_truncation_exactly_at_max_chars_boundary(self):
+        """输出长度恰好等于 max_chars 时，不触发字符截断（测试 off-by-one）。"""
+        # 5 行，每行 10 个字符：5*10 + 4 个换行符 = 54
+        content = "\n".join("x" * 10 for _ in range(5))
+        assert len(content) == 54
+        result = _truncate_test_output(content, max_lines=10, max_chars=54)
+        assert result == content
+
+    def test_both_constraints_apply_lines_then_chars(self):
+        """行数和字符数同时超限时，先截行再截字符。"""
+        # 60 行，每行 100 个字符：60*100 + 59 = 6059 字符
+        content = "\n".join("y" * 100 for _ in range(60))
+        result = _truncate_test_output(content, max_lines=30, max_chars=1500)
+        assert "[... 输出已截断" in result
+        # 行截断后 30*100+29 = 3029 > 1500，字符截断也会触发
+        content_after_note = result.split("\n\n", 1)[-1]
+        assert len(content_after_note) == 1500
+
+

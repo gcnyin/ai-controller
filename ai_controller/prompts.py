@@ -237,22 +237,4 @@ def build_retry_prompt(task: dict, test_command: str, test_output: str,
     )
 
 
-if __name__ == "__main__":
-    # Self-check: truncation logic
-    short = "line1\nline2"
-    assert _truncate_test_output(short) == short, "short output must be unchanged"
 
-    many_lines = "\n".join(f"line{i}" for i in range(100))
-    result = _truncate_test_output(many_lines, max_lines=50, max_chars=10000)
-    assert "[... 输出已截断" in result, "many lines must trigger truncation note"
-    assert result.count("\n") <= 51, "must not exceed max_lines + note lines"
-
-    long_content = "x" * 5000
-    result = _truncate_test_output(long_content, max_lines=50, max_chars=4000)
-    assert "[... 输出已截断" in result, "long content must trigger truncation note"
-    assert len(result) <= 4000 + 200, "output must be bounded near max_chars"
-
-    empty = ""
-    assert _truncate_test_output(empty) == empty, "empty input must stay empty"
-
-    print("prompts self-check passed")
