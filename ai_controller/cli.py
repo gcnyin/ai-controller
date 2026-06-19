@@ -5,6 +5,7 @@ import time
 import shlex
 import shutil
 import argparse
+import importlib.metadata
 import textwrap
 from pathlib import Path
 from datetime import datetime
@@ -882,6 +883,13 @@ def main():
                         help="手动指定测试命令,覆盖 AI 规划阶段输出的 test_command")
     parser.add_argument("--task-ids", default="",
                         help="只运行指定 ID 的任务子集，逗号分隔（如 1,3,5 或 1-3,5）")
+
+    try:
+        _version = importlib.metadata.version("ai-controller")
+    except importlib.metadata.PackageNotFoundError:
+        _version = "unknown"
+    parser.add_argument("-V", "--version", action="version",
+                        version=f"%(prog)s {_version}")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
