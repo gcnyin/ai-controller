@@ -10,8 +10,11 @@
 参数优先级：命令行参数 > 配置文件参数 > argparse 默认值
 """
 
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 # 支持的配置文件名（按优先级排序）
@@ -136,9 +139,68 @@ def load_config(target_dir: str) -> Dict[str, Any]:
                     config[key] = float(value)
                 except (TypeError, ValueError):
                     pass
-            elif key in ("agent", "agent_args", "test_command"):
+            elif key == "test_command":
+                if isinstance(value, str):
+                    config[key] = value
+                else:
+                    logger.warning(
+                        "配置文件中的 test_command 应为字符串类型,实际为 %s,已忽略该参数",
+                        type(value).__name__,
+                    )
+            elif key in ("agent", "agent_args"):
                 config[key] = str(value)
             elif key in ("no_backup", "plan_only", "replan", "dry_run", "no_commit"):
                 config[key] = bool(value)
 
     return config
+
+
+if __name__ == "__main__":
+    import tempfile
+    import os
+
+    _passed = 0
+    _failed = 0
+
+    def check(name, cond):
+        global _passed, _failed
+        if cond:
+            _passed += 1
+            print(f"  PASS {name}")
+        else:
+            _failed += 1
+            print(f"  FAIL {name}")
+
+    print("test_command type guard:")
+
+    # Case 1: boolean true -> rejected
+    with tempfile.TemporaryDirectory() as td:
+        yaml_path = Path(td) / ".ai-controller.yaml"
+        yaml_path.write_text("test_command: true\n", encoding="utf-8")
+        cfg = load_config(td)
+        check("boolean true is rejected", "test_command" not in cfg)
+
+    # Case 2: nil/None -> rejected
+    with tempfile.TemporaryDirectory() as td:
+        yaml_path = Path(td) / ".ai-controller.yaml"
+        yaml_path.write_text("test_command:\n", encoding="utf-8")
+        cfg = load_config(td)
+        check("nil is rejected", "test_command" not in cfg)
+
+    # Case 3: valid string -> accepted
+    with tempfile.TemporaryDirectory() as td:
+        yaml_path = Path(td) / ".ai-controller.yaml"
+        yaml_path.write_text('test_command: "echo ok"\n', encoding="utf-8")
+        cfg = load_config(td)
+        check("valid string is accepted", cfg.get("test_command") == "echo ok")
+
+    # Case 4: integer -> rejected
+    with tempfile.TemporaryDirectory() as td:
+        yaml_path = Path(td) / ".ai-controller.yaml"
+        yaml_path.write_text("test_command: 42\n", encoding="utf-8")
+        cfg = load_config(td)
+        check("integer is rejected", "test_command" not in cfg)
+
+    print(f"\n{_passed}/{_passed + _failed} passed")
+    if _failed:
+        raise SystemExit(1)
