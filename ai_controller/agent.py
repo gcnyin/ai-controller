@@ -97,6 +97,8 @@ def call_agent(agent: str, prompt: str, target_dir: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding='utf-8',
+            errors='replace',
         )
 
         stdout_data, _ = proc.communicate(timeout=timeout)
@@ -164,6 +166,8 @@ def run_test_command(cmd: str, target_dir: str, timeout: int) -> tuple[bool, str
             shell=True,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=timeout,
         )
         elapsed = time.time() - start
