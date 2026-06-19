@@ -225,6 +225,7 @@ def _execute_single_round(
     summary_prefix: str = "",
     error_label: str = "Agent 返回异常",
     defer_commit: bool = False,
+    no_commit: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑：备份、调用 Agent、检测改动、记录日志、Git 提交。
 
@@ -277,7 +278,7 @@ def _execute_single_round(
         write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
 
         # ── Git 提交 ──        
-        if git_repo and not defer_commit:
+        if git_repo and not defer_commit and not no_commit:
             diff_stat = get_git_diff_summary(target_dir)
             git_commit(target_dir, round_num, summary)
             if diff_stat:
@@ -311,6 +312,7 @@ def _execute_task_with_retry(
     keep_backups: int,
     round_num: int,
     sleep_between: float,
+    no_commit: bool = False,
 ) -> dict:
     """执行单个任务，带测试验证和重试。
 
@@ -350,6 +352,7 @@ def _execute_task_with_retry(
             summary_prefix=summary_prefix,
             error_label=f"任务 #{task_id} 执行失败",
             defer_commit=True,  # 始终推迟提交，由外层统一处理
+            no_commit=no_commit,
         )
         total_elapsed += result["elapsed"]
 
@@ -425,6 +428,7 @@ def run_loop(
     keep_backups: int = 0,
     replan: bool = False,
     dry_run: bool = False,
+    no_commit: bool = False,
 ):
     print()
     print("╔═══════════════════════════════════════════════╗")
@@ -444,7 +448,10 @@ def run_loop(
     elif not no_backup and git_repo_for_display:
         print(f"  备份     : 跳过(Git 仓库已有版本历史)")
     if is_git_repo(target_dir):
-        print(f"  Git      : 自动 commit")
+        if no_commit:
+            print(f"  Git      : 自动 commit (已禁用)")
+        else:
+            print(f"  Git      : 自动 commit")
 
 
 
@@ -602,7 +609,7 @@ def run_loop(
             mark_task_done(target_dir, task["id"], round_num, tasks,
                            run_count=run_count, last_run=last_run,
                            global_round=round_num, gen_time=gen_time)
-            if git_repo:
+            if git_repo and not no_commit:
                 git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
             consecutive_noops = 0
             time.sleep(sleep_between)
@@ -621,6 +628,7 @@ def run_loop(
             target_dir, agent, task, prompt, test_command,
             max_retries, no_backup, timeout, agent_args, keep_backups,
             round_num, sleep_between,
+            no_commit=no_commit,
         )
 
         if not result["success"] and not result["has_diff"]:
@@ -646,7 +654,7 @@ def run_loop(
                        global_round=round_num, gen_time=gen_time)
         consecutive_noops = 0
 
-        if git_repo:
+        if git_repo and not no_commit:
             git_commit(target_dir, round_num, result["summary"])
 
         print(f"  ⏳ 等待 {sleep_between}s...")
@@ -788,6 +796,8 @@ def main():
 
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式:跳过 Agent 调用和文件修改,只打印每轮要执行的任务描述和命令")
+    parser.add_argument("--no-commit", action="store_true",
+                        help="跳过 Git 自动提交,但仍记录 changelog")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -877,6 +887,7 @@ def main():
             keep_backups=args.keep_backups,
             replan=args.replan,
             dry_run=args.dry_run,
+            no_commit=args.no_commit,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
