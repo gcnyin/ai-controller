@@ -429,6 +429,7 @@ def run_loop(
     replan: bool = False,
     dry_run: bool = False,
     no_commit: bool = False,
+    test_command_override: Optional[str] = None,
 ):
     print()
     print("╔═══════════════════════════════════════════════╗")
@@ -553,6 +554,14 @@ def run_loop(
         for t in tasks:
             logger.info(f"  #{t.get('id')} [{t.get('priority', '?')}] [{t.get('type', '')}] {t.get('title', '')}")
         logger.info(f"{'─' * 40}")
+
+    # ─── 测试命令覆盖（命令行参数优先于 AI 生成/文件加载）───
+    if test_command_override is not None:
+        test_command = test_command_override if test_command_override.strip() else None
+        if test_command:
+            logger.info(f"测试命令(手动指定): {test_command}")
+            # 回写到元信息中，确保后续 save_task_list 输出正确的测试命令
+            metadata["test_command"] = test_command
 
     # ─── 更新运行元信息 ───
     run_count = metadata.get("run_count", 1) + 1 if has_existing_tasks else metadata.get("run_count", 1)
@@ -798,6 +807,8 @@ def main():
                         help="预览模式:跳过 Agent 调用和文件修改,只打印每轮要执行的任务描述和命令")
     parser.add_argument("--no-commit", action="store_true",
                         help="跳过 Git 自动提交,但仍记录 changelog")
+    parser.add_argument("--test-command", default=None,
+                        help="手动指定测试命令,覆盖 AI 规划阶段输出的 test_command")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -863,6 +874,13 @@ def main():
         if tasks is None:
             logger.error("规划失败,未能生成任务列表。")
             sys.exit(1)
+
+        # 命令行 --test-command 覆盖 AI 生成的 test_command
+        if args.test_command is not None:
+            test_command = args.test_command if args.test_command.strip() else None
+            if test_command:
+                logger.info(f"测试命令(手动指定): {test_command}")
+
         if len(tasks) == 0:
             logger.info("AI 评估后认为代码库已完善,无需改进。")
         else:
@@ -888,6 +906,7 @@ def main():
             replan=args.replan,
             dry_run=args.dry_run,
             no_commit=args.no_commit,
+            test_command_override=args.test_command,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")

@@ -86,6 +86,7 @@ uv run ai-controller ./my-project --agent pi --agent-args "--model gpt-4"
 | `--plan-only` | 只生成任务列表 AI-TASKS.md，不执行 | false |
 | `--replan` | 强制重新生成任务列表（备份旧文件为 .bak） | false |
 | `--dry-run` | 预览模式：打印执行计划，不实际修改文件 | false |
+| `--test-command` | 手动指定测试命令，覆盖 AI 规划阶段输出的 test_command | - |
 
 ## 配置文件
 
