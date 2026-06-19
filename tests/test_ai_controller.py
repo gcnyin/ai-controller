@@ -1747,3 +1747,93 @@ class TestTruncateTestOutput:
         assert len(content_after_note) == 1500
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# _parse_task_ids
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseTaskIds:
+    """测试 --task-ids 参数解析（逗号分隔、范围格式）。"""
+
+    def test_single_id(self):
+        assert ac.cli._parse_task_ids("5") == {5}
+
+    def test_multiple_ids(self):
+        assert ac.cli._parse_task_ids("1,3,5") == {1, 3, 5}
+
+    def test_range(self):
+        assert ac.cli._parse_task_ids("1-3") == {1, 2, 3}
+
+    def test_mixed_range_and_single(self):
+        assert ac.cli._parse_task_ids("1-3,5,7-9") == {1, 2, 3, 5, 7, 8, 9}
+
+    def test_empty_string(self):
+        assert ac.cli._parse_task_ids("") == set()
+
+    def test_whitespace_only(self):
+        assert ac.cli._parse_task_ids("   ") == set()
+
+    def test_ids_with_whitespace(self):
+        assert ac.cli._parse_task_ids(" 1 , 2 , 3-5 ") == {1, 2, 3, 4, 5}
+
+    def test_invalid_range_start_gt_end(self):
+        """范围起始大于结束时返回空集合。"""
+        assert ac.cli._parse_task_ids("3-1") == set()
+
+    def test_invalid_non_numeric(self):
+        assert ac.cli._parse_task_ids("abc") == set()
+
+    def test_invalid_mixed_with_valid(self):
+        """混合有效和无效值时，整个解析失败返回空集合。"""
+        assert ac.cli._parse_task_ids("1,abc,3") == set()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _filter_tasks_by_ids
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFilterTasksByIds:
+    """测试按 task_ids 过滤任务列表。"""
+
+    def _make_tasks(self):
+        return [
+            {"id": 1, "title": "task1"},
+            {"id": 2, "title": "task2"},
+            {"id": 3, "title": "task3"},
+        ]
+
+    def test_all_match(self):
+        tasks = self._make_tasks()
+        result = ac.cli._filter_tasks_by_ids(tasks, {1, 2, 3})
+        assert len(result) == 3
+        assert {t["id"] for t in result} == {1, 2, 3}
+
+    def test_partial_match(self):
+        tasks = self._make_tasks()
+        result = ac.cli._filter_tasks_by_ids(tasks, {1, 3})
+        assert len(result) == 2
+        assert {t["id"] for t in result} == {1, 3}
+
+    def test_all_missing_ids_warns(self, caplog):
+        tasks = self._make_tasks()
+        result = ac.cli._filter_tasks_by_ids(tasks, {99, 100})
+        assert result == []
+        assert "2 个 ID 在任务列表中不存在" in caplog.text
+
+    def test_some_missing_ids_warns(self, caplog):
+        tasks = self._make_tasks()
+        result = ac.cli._filter_tasks_by_ids(tasks, {1, 99})
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        assert "1 个 ID 在任务列表中不存在" in caplog.text
+        assert "99" in caplog.text
+
+    def test_empty_id_set(self):
+        tasks = self._make_tasks()
+        result = ac.cli._filter_tasks_by_ids(tasks, set())
+        assert result == []
+
+    def test_empty_task_list(self):
+        result = ac.cli._filter_tasks_by_ids([], {1, 2})
+        assert result == []
+
+
