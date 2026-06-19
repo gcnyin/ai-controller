@@ -523,13 +523,13 @@ def run_loop(
         print(f"  模式     : 预览模式(不实际修改任何文件)")
     print()
 
-    # 自动管理 .gitignore：将生成的文件路径追加到目标仓库的忽略列表
-    ensure_gitignore(target_dir)
-
     model_hint = extract_model_hint(agent_args)
     init_log(target_dir, agent, model_hint)
     if model_hint:
         print(f"  模型     : {model_hint}")
+
+    # 自动管理 .gitignore：将生成的文件路径追加到目标仓库的忽略列表
+    ensure_gitignore(target_dir)
 
     # 检查工作区是否有未提交的改动,如有则自动 stash 隔离
     stashed = False
