@@ -68,6 +68,10 @@ uv run ai-controller ./my-project --agent pi --dry-run
 
 # 传递额外参数给 Agent（如指定模型）
 uv run ai-controller ./my-project --agent pi --agent-args "--model gpt-4"
+
+# 只运行指定 ID 的任务（跳过其他任务，适合增量推进或调试单个任务）
+uv run ai-controller ./my-project --agent pi --task-ids 1,3,5
+uv run ai-controller ./my-project --agent pi --task-ids 1-3,5
 ```
 
 ## 参数
@@ -87,6 +91,7 @@ uv run ai-controller ./my-project --agent pi --agent-args "--model gpt-4"
 | `--replan` | 强制重新生成任务列表（备份旧文件为 .bak） | false |
 | `--dry-run` | 预览模式：打印执行计划，不实际修改文件 | false |
 | `--test-command` | 手动指定测试命令，覆盖 AI 规划阶段输出的 test_command | - |
+| `--task-ids` | 只运行指定 ID 的任务子集，逗号分隔（如 1,3,5 或 1-3,5） | - |
 
 ## 配置文件
 

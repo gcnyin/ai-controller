@@ -67,6 +67,60 @@ def extract_model_hint(agent_args: Optional[list]) -> str:
     return hint
 
 
+def _parse_task_ids(raw: str) -> set[int]:
+    """解析 --task-ids 字符串，支持逗号分隔和范围格式（如 1,3,5 或 1-3,5）。
+
+    Returns:
+        解析后的整数集合，解析失败返回空集合。
+    """
+    if not raw or not raw.strip():
+        return set()
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start_s, end_s = part.split("-", 1)
+                start, end = int(start_s), int(end_s)
+                if start > end:
+                    return set()
+                ids.update(range(start, end + 1))
+            except (ValueError, TypeError):
+                return set()
+        else:
+            try:
+                ids.add(int(part))
+            except ValueError:
+                return set()
+    return ids
+
+
+def _filter_tasks_by_ids(tasks: list, task_ids: set, target_dir: str) -> list:
+    """按 task_ids 过滤任务列表，保留匹配 ID 的待执行任务。
+
+    已完成且匹配的任务保留其完成状态；不匹配 ID 的任务直接丢弃。
+    对 task_ids 中存在但 tasks 中不存在的 ID，记录警告。
+    """
+    task_id_set = {t.get("id") for t in tasks}
+    missing = task_ids - task_id_set
+    if missing:
+        logger.warning(
+            "--task-ids 中 %d 个 ID 在任务列表中不存在: %s",
+            len(missing), ",".join(str(i) for i in sorted(missing)),
+        )
+    filtered = [t for t in tasks if t.get("id") in task_ids]
+    logger.info(
+        "按 --task-ids 过滤: 保留 %d/%d 个任务",
+        len(filtered), len(tasks),
+    )
+    # 回写到文件，使 AI-TASKS.md 反映过滤后的任务列表
+    from .tasks import save_task_list
+    save_task_list(target_dir, filtered)
+    return filtered
+
+
 def _setup_logging(target_dir: str):
     """配置标准 logging:控制台 + 文件双输出。"""
     root_logger = logging.getLogger("ai_controller")
@@ -430,6 +484,7 @@ def run_loop(
     dry_run: bool = False,
     no_commit: bool = False,
     test_command_override: Optional[str] = None,
+    task_ids: Optional[set] = None,
 ):
     print()
     print("╔═══════════════════════════════════════════════╗")
@@ -554,6 +609,15 @@ def run_loop(
         for t in tasks:
             logger.info(f"  #{t.get('id')} [{t.get('priority', '?')}] [{t.get('type', '')}] {t.get('title', '')}")
         logger.info(f"{'─' * 40}")
+
+    # ─── 按 --task-ids 过滤任务 ───
+    if task_ids is not None and tasks is not None:
+        tasks = _filter_tasks_by_ids(tasks, task_ids, target_dir)
+        if not tasks:
+            logger.info("所有指定 ID 的任务已完成或不存在，退出。")
+            if stashed:
+                git_stash_pop(target_dir)
+            return
 
     # ─── 测试命令覆盖（命令行参数优先于 AI 生成/文件加载）───
     if test_command_override is not None:
@@ -809,6 +873,8 @@ def main():
                         help="跳过 Git 自动提交,但仍记录 changelog")
     parser.add_argument("--test-command", default=None,
                         help="手动指定测试命令,覆盖 AI 规划阶段输出的 test_command")
+    parser.add_argument("--task-ids", default="",
+                        help="只运行指定 ID 的任务子集，逗号分隔（如 1,3,5 或 1-3,5）")
 
     # ── 第一阶段:仅解析 directory 参数,用于定位配置文件 ──
     # 用 partial parse 只拿到 directory,忽略其他参数的缺失
@@ -857,6 +923,14 @@ def main():
     agent_args = None
     if args.agent_args:
         agent_args = shlex.split(args.agent_args)
+
+    # 解析 --task-ids
+    task_ids = None
+    if args.task_ids:
+        task_ids = _parse_task_ids(args.task_ids)
+        if not task_ids:
+            logger.error("--task-ids 格式错误: %s (示例: 1,3,5 或 1-3,5)", args.task_ids)
+            sys.exit(1)
 
     # --plan-only:只生成任务列表
     if args.plan_only:
@@ -907,6 +981,7 @@ def main():
             dry_run=args.dry_run,
             no_commit=args.no_commit,
             test_command_override=args.test_command,
+            task_ids=task_ids,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
