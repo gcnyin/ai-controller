@@ -85,6 +85,7 @@ uv run ai-controller ./my-project --agent pi --task-ids 1-3,5
 | `--timeout` | Agent 单轮超时秒数 | 600 |
 | `--sleep` | 每轮间隔秒数 | 2.0 |
 | `--no-backup` | 不备份（Git 仓库自动跳过备份） | false |
+| `--no-commit` | 跳过 Git 自动提交，但仍记录 changelog | false |
 | `--agent-args` | 传递给 Agent 的额外参数（引号包裹） | - |
 | `--keep-backups` | 只保留最近 N 个备份（0=不限制） | 0 |
 | `--plan-only` | 只生成任务列表 AI-TASKS.md，不执行 | false |
