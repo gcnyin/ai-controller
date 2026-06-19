@@ -205,14 +205,54 @@ def build_task_prompt(task: dict) -> str:
     return TASK_PROMPT.format(task_description=desc)
 
 
+def _truncate_test_output(output: str, max_lines: int = 50, max_chars: int = 4000) -> str:
+    """Truncate test output to last N lines and last N chars to prevent context overflow.
+
+    Both constraints apply; the stricter one wins. Adds a truncation note when output is
+    actually trimmed.
+    """
+    orig_len = len(output)
+    lines = output.splitlines()
+    if len(lines) > max_lines:
+        output = "\n".join(lines[-max_lines:])
+    if len(output) > max_chars:
+        output = output[-max_chars:]
+    if len(output) < orig_len:
+        note = f"[... 输出已截断，原始共 {orig_len} 字符 / {len(lines)} 行，仅保留尾部]\n\n"
+        output = note + output
+    return output
+
+
 def build_retry_prompt(task: dict, test_command: str, test_output: str,
                        changed_files: list[str]) -> str:
     """Build a retry prompt when tests fail after a task execution."""
     desc = f"**[{task.get('type', 'improvement')}] {task.get('title', '')}**\n\n{task.get('description', '')}"
     files_str = "\n".join(f"- `{f}`" for f in changed_files) if changed_files else "(无文件改动)"
+    truncated = _truncate_test_output(test_output)
     return RETRY_PROMPT.format(
         task_description=desc,
         changed_files=files_str,
         test_command=test_command,
-        test_output=test_output,
+        test_output=truncated,
     )
+
+
+if __name__ == "__main__":
+    # Self-check: truncation logic
+    short = "line1\nline2"
+    assert _truncate_test_output(short) == short, "short output must be unchanged"
+
+    many_lines = "\n".join(f"line{i}" for i in range(100))
+    result = _truncate_test_output(many_lines, max_lines=50, max_chars=10000)
+    assert "[... 输出已截断" in result, "many lines must trigger truncation note"
+    assert result.count("\n") <= 51, "must not exceed max_lines + note lines"
+
+    long_content = "x" * 5000
+    result = _truncate_test_output(long_content, max_lines=50, max_chars=4000)
+    assert "[... 输出已截断" in result, "long content must trigger truncation note"
+    assert len(result) <= 4000 + 200, "output must be bounded near max_chars"
+
+    empty = ""
+    assert _truncate_test_output(empty) == empty, "empty input must stay empty"
+
+    print("prompts self-check passed")
