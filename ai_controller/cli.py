@@ -892,7 +892,7 @@ def main():
     config = load_config(str(prelim_target))
     if config:
         log_target = str(prelim_target)
-        logger.info(f"已加载配置文件: {', '.join(f'{k}={v}' for k, v in sorted(config.items()))}")
+        print(f"已加载配置文件: {', '.join(f'{k}={v}' for k, v in sorted(config.items()))}")
         parser.set_defaults(**config)
 
     # ── 正式解析(命令行参数覆盖配置文件值)──
