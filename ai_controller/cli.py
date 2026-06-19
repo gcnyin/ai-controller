@@ -167,7 +167,14 @@ def ensure_gitignore(target_dir: str) -> bool:
 
     gitignore_path = Path(target_dir) / ".gitignore"
     if not gitignore_path.is_file():
-        return False
+        if not is_git_repo(target_dir):
+            return False
+        with open(gitignore_path, "w", encoding="utf-8") as f:
+            f.write("# AI 自迭代控制器 生成文件\n")
+            for entry in generated_entries:
+                f.write(entry + "\n")
+        logger.info("已创建 .gitignore 并添加 %d 个控制器条目", len(generated_entries))
+        return True
 
     content = gitignore_path.read_text(encoding="utf-8", errors="replace")
     existing_lines = set(line.strip() for line in content.splitlines())

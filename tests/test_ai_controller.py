@@ -1161,9 +1161,21 @@ class TestEnsureGitignore:
     """测试 ensure_gitignore 自动管理目标仓库 .gitignore。"""
 
     def test_no_gitignore_file(self, tmp_workspace):
-        """目标目录无 .gitignore 文件，跳过，返回 False。"""
+        """目标目录无 .gitignore 文件且非 git 仓库，跳过，返回 False。"""
         result = ac.ensure_gitignore(tmp_workspace)
         assert result is False
+
+    def test_no_gitignore_but_git_repo_creates_it(self, tmp_workspace):
+        """git 仓库中无 .gitignore 时，自动创建并写入控制器条目。"""
+        (Path(tmp_workspace) / ".git").mkdir()
+        result = ac.ensure_gitignore(tmp_workspace)
+        assert result is True
+        content = (Path(tmp_workspace) / ".gitignore").read_text(encoding="utf-8")
+        assert "# AI 自迭代控制器 生成文件" in content
+        assert "AI-TASKS.md" in content
+        assert "AI-CHANGELOG.md" in content
+        assert "ai-controller.log" in content
+        assert ".ai-controller-backups/" in content
 
     def test_all_entries_already_present(self, tmp_workspace):
         ".gitignore 已包含所有生成路径，不修改，返回 False。"""
