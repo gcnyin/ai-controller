@@ -31,7 +31,8 @@ def has_changes(target_dir: str) -> bool:
             capture_output=True, text=True, timeout=10,
         )
         return bool(r.stdout.strip())
-    except Exception:
+    except Exception as e:
+        logger.warning("git status --porcelain 检测失败，跳过 auto-stash: %s", e)
         return False
 
 
