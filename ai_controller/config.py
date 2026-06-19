@@ -117,6 +117,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
         "replan",
         "dry_run",
         "no_commit",
+        "test_command",
     }
 
     config: Dict[str, Any] = {}
@@ -135,7 +136,7 @@ def load_config(target_dir: str) -> Dict[str, Any]:
                     config[key] = float(value)
                 except (TypeError, ValueError):
                     pass
-            elif key in ("agent", "agent_args"):
+            elif key in ("agent", "agent_args", "test_command"):
                 config[key] = str(value)
             elif key in ("no_backup", "plan_only", "replan", "dry_run", "no_commit"):
                 config[key] = bool(value)
