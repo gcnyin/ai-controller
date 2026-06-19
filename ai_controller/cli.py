@@ -659,87 +659,92 @@ def run_loop(
     current_task_id = None
     git_repo = is_git_repo(target_dir)
 
-    while True:
-        # 获取下一个待执行任务(从内存缓存查找,避免重复解析文件)
-        task = get_next_pending_task(target_dir, active_tasks)
+    try:
+        while True:
+            # 获取下一个待执行任务(从内存缓存查找,避免重复解析文件)
+            task = get_next_pending_task(target_dir, active_tasks)
 
-        # 任务切换时重置连续无改动计数器(每个任务独立计数)
-        if task is not None and task.get("id") != current_task_id:
-            current_task_id = task["id"]
-            consecutive_noops = 0
-        if task is None:
-            logger.info("所有任务已完成!")
-            break
+            # 任务切换时重置连续无改动计数器(每个任务独立计数)
+            if task is not None and task.get("id") != current_task_id:
+                current_task_id = task["id"]
+                consecutive_noops = 0
+            if task is None:
+                logger.info("所有任务已完成!")
+                break
 
-        round_num += 1
+            round_num += 1
 
-        if max_rounds > 0 and round_num > max_rounds:
-            pending_left = sum(1 for t in active_tasks if t.get("status") != "done")
-            logger.info(
-                f"达到最大轮次 {max_rounds}(剩余 {pending_left} 个待执行任务),退出。"
-            )
-            break
+            if max_rounds > 0 and round_num > max_rounds:
+                pending_left = sum(1 for t in active_tasks if t.get("status") != "done")
+                logger.info(
+                    f"达到最大轮次 {max_rounds}(剩余 {pending_left} 个待执行任务),退出。"
+                )
+                break
 
-        # 连续无改动:跳过当前任务,标记完成,继续下一个
-        if consecutive_noops >= 3:
+            # 连续无改动:跳过当前任务,标记完成,继续下一个
+            if consecutive_noops >= 3:
+                tid = task.get("id", "?")
+                title = task.get("title", "")
+                logger.info(
+                    f"连续 {consecutive_noops} 轮无改动,跳过任务 #{tid} - {title}"
+                )
+                mark_task_done(target_dir, task["id"], round_num, tasks,
+                               run_count=run_count, last_run=last_run,
+                               global_round=round_num, gen_time=gen_time)
+                if git_repo and not no_commit:
+                    git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
+                consecutive_noops = 0
+                time.sleep(sleep_between)
+                continue
+
             tid = task.get("id", "?")
             title = task.get("title", "")
-            logger.info(
-                f"连续 {consecutive_noops} 轮无改动,跳过任务 #{tid} - {title}"
+
+            print(f"\n{'─' * 55}")
+            print(f"  第 {round_num} 轮: 执行任务 #{tid} - {title}")
+            print(f"{'─' * 55}")
+
+            # 构建任务 prompt 并使用带测试重试的执行
+            prompt = build_task_prompt(task)
+            result = _execute_task_with_retry(
+                target_dir, agent, task, prompt, test_command,
+                max_retries, no_backup, timeout, agent_args, keep_backups,
+                round_num, sleep_between,
+                no_commit=no_commit,
             )
+
+            if not result["success"] and not result["has_diff"]:
+                # Agent 失败且无改动
+                consecutive_noops += 1
+                time.sleep(sleep_between)
+                continue
+
+            # 记录重试信息
+            retries_used = result.get("retries_used", 0)
+            if retries_used > 0:
+                if result.get("final_test_passed"):
+                    logger.info(
+                        f"任务 #{tid} 经过 {retries_used} 次重试后测试通过"
+                    )
+                else:
+                    logger.warning(
+                        f"任务 #{tid} 测试失败，已用完 {retries_used} 次重试"
+                    )
+
             mark_task_done(target_dir, task["id"], round_num, tasks,
                            run_count=run_count, last_run=last_run,
                            global_round=round_num, gen_time=gen_time)
-            if git_repo and not no_commit:
-                git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
             consecutive_noops = 0
+
+            if git_repo and not no_commit:
+                git_commit(target_dir, round_num, result["summary"])
+
+            print(f"  ⏳ 等待 {sleep_between}s...")
             time.sleep(sleep_between)
-            continue
 
-        tid = task.get("id", "?")
-        title = task.get("title", "")
-
-        print(f"\n{'─' * 55}")
-        print(f"  第 {round_num} 轮: 执行任务 #{tid} - {title}")
-        print(f"{'─' * 55}")
-
-        # 构建任务 prompt 并使用带测试重试的执行
-        prompt = build_task_prompt(task)
-        result = _execute_task_with_retry(
-            target_dir, agent, task, prompt, test_command,
-            max_retries, no_backup, timeout, agent_args, keep_backups,
-            round_num, sleep_between,
-            no_commit=no_commit,
-        )
-
-        if not result["success"] and not result["has_diff"]:
-            # Agent 失败且无改动
-            consecutive_noops += 1
-            time.sleep(sleep_between)
-            continue
-
-        # 记录重试信息
-        retries_used = result.get("retries_used", 0)
-        if retries_used > 0:
-            if result.get("final_test_passed"):
-                logger.info(
-                    f"任务 #{tid} 经过 {retries_used} 次重试后测试通过"
-                )
-            else:
-                logger.warning(
-                    f"任务 #{tid} 测试失败，已用完 {retries_used} 次重试"
-                )
-
-        mark_task_done(target_dir, task["id"], round_num, tasks,
-                       run_count=run_count, last_run=last_run,
-                       global_round=round_num, gen_time=gen_time)
-        consecutive_noops = 0
-
-        if git_repo and not no_commit:
-            git_commit(target_dir, round_num, result["summary"])
-
-        print(f"  ⏳ 等待 {sleep_between}s...")
-        time.sleep(sleep_between)
+    except KeyboardInterrupt:
+        print("\n\n⏹ 用户中断，保存当前进度后退出。")
+        logger.warning("用户中断，保存当前进度后退出。")
 
     # ─── 退出前保存最终状态 ───
     save_task_list(target_dir, tasks,
