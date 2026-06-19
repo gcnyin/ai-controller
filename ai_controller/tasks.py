@@ -15,6 +15,7 @@ from .prompts import PLAN_PROMPT
 logger = logging.getLogger(__name__)
 
 TASK_FILE = "AI-TASKS.md"
+TASK_JSON_FILE = "AI-TASKS.json"
 
 
 def generate_task_list(agent: str, target_dir: str,
@@ -124,8 +125,9 @@ def save_task_list(target_dir: str, tasks: List[dict],
                    last_run: str = "",
                    global_round: int = 0,
                    gen_time: str = "",
-                   test_command: Optional[str] = None):
-    """将任务列表保存到 AI-TASKS.md。
+                   test_command: Optional[str] = None,
+                   json_output: bool = False):
+    """将任务列表保存到 AI-TASKS.md（以及 AI-TASKS.json）。
 
     Args:
         run_count: 已运行次数
@@ -133,6 +135,7 @@ def save_task_list(target_dir: str, tasks: List[dict],
         global_round: 全局轮次计数
         gen_time: 生成时间字符串，为空则使用当前时间
         test_command: 项目测试命令，为空则跳过
+        json_output: 是否同时写入 AI-TASKS.json（机器可读格式）
     """
     gen_ts = gen_time if gen_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not last_run:
@@ -196,6 +199,27 @@ def save_task_list(target_dir: str, tasks: List[dict],
         path.write_text("\n".join(lines), encoding="utf-8")
     except OSError as e:
         logger.warning("无法写入任务文件 %s: %s", path, e)
+
+    # ── JSON 输出（机器可读）──
+    if json_output:
+        json_path = Path(target_dir) / TASK_JSON_FILE
+        # 构建完整 JSON 结构（元信息 + 任务列表）
+        payload = {
+            "gen_time": gen_ts,
+            "run_count": run_count,
+            "last_run": last_run,
+            "global_round": global_round,
+            "tasks": tasks,
+        }
+        if test_command:
+            payload["test_command"] = test_command
+        try:
+            json_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.warning("无法写入 JSON 任务文件 %s: %s", json_path, e)
 
 
 def load_task_metadata(target_dir: str) -> Dict[str, Any]:
@@ -358,7 +382,8 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
                    run_count: int = 1,
                    last_run: str = "",
                    global_round: int = 0,
-                   gen_time: str = ""):
+                   gen_time: str = "",
+                   json_output: bool = False):
     """在任务列表中标记某个任务为已完成。
 
     若提供 tasks，则原地修改内存列表并写回文件（避免重复读取解析）。
@@ -366,6 +391,7 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
 
     Args:
         run_count, last_run, global_round, gen_time: 传递给 save_task_list 的元信息
+        json_output: 传递给 save_task_list，是否同时写入 JSON
     """
     completed_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -378,7 +404,8 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
                 break
         save_task_list(target_dir, tasks,
                        run_count=run_count, last_run=last_run,
-                       global_round=global_round, gen_time=gen_time)
+                       global_round=global_round, gen_time=gen_time,
+                       json_output=json_output)
         return
 
     # 回退：从文件加载
@@ -395,7 +422,8 @@ def mark_task_done(target_dir: str, task_id: int, round_num: int,
 
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
-                   global_round=global_round, gen_time=gen_time)
+                   global_round=global_round, gen_time=gen_time,
+                   json_output=json_output)
 
 
 def get_next_pending_task(target_dir: str,
@@ -420,3 +448,50 @@ def get_next_pending_task(target_dir: str,
         if t.get("status") != "done":
             return t
     return None
+
+
+# ── 自检：验证 JSON 任务输出 ────────────────────────────────────────
+
+def _self_check():
+    """验证 save_task_list 在 json_output=True 时正确写入 JSON 文件。"""
+    import tempfile
+    import os
+
+    td = tempfile.mkdtemp()
+    try:
+        tasks_data = [
+            {"id": 1, "status": "pending", "priority": "high",
+             "type": "bug", "title": "Fix crash", "description": "",
+             "completed_round": None, "completed_time": None},
+        ]
+        save_task_list(td, tasks_data, run_count=1, last_run="",
+                       global_round=0, gen_time="2026-01-01 00:00:00",
+                       test_command="pytest", json_output=True)
+
+        # 验证 JSON 文件存在且内容正确
+        jp = Path(td) / TASK_JSON_FILE
+        assert jp.is_file(), f"JSON 文件未创建: {jp}"
+        data = json.loads(jp.read_text(encoding="utf-8"))
+        assert data["run_count"] == 1
+        assert len(data["tasks"]) == 1
+        assert data["tasks"][0]["id"] == 1
+        assert data["test_command"] == "pytest"
+
+        # 验证 json_output=False 不创建 JSON 文件
+        td2 = tempfile.mkdtemp()
+        try:
+            save_task_list(td2, tasks_data, json_output=False)
+            assert not (Path(td2) / TASK_JSON_FILE).is_file(), (
+                "json_output=False 时不应创建 JSON 文件")
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(td2, ignore_errors=True)
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(td, ignore_errors=True)
+
+    print("tasks._self_check: OK")
+
+
+if __name__ == "__main__":
+    _self_check()

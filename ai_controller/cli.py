@@ -13,6 +13,7 @@ from typing import Optional
 
 
 import logging
+import json
 
 from . import LOG_FILE, LOGGER_FILE
 from .config import load_config
@@ -149,12 +150,15 @@ logger = logging.getLogger(__name__)
 
 # ─── .gitignore 管理 ────────────────────────────────────────────────
 
-def ensure_gitignore(target_dir: str) -> bool:
+def ensure_gitignore(target_dir: str, json_output: bool = False) -> bool:
     """确保目标目录的 .gitignore 包含所有 AI 控制器生成的文件/目录路径。
 
     检查目标目录下的 .gitignore 文件，如果缺少 AI-TASKS.md、
     AI-CHANGELOG.md、ai-controller.log、.ai-controller-backups/ 等路径，
     自动追加一个带注释标题的段落。
+
+    Args:
+        json_output: 若为 True，同时追加 AI-TASKS.json 和 AI-CHANGELOG.jsonl
 
     Returns:
         True 表示 .gitignore 已被修改，False 表示无需修改。
@@ -165,6 +169,10 @@ def ensure_gitignore(target_dir: str) -> bool:
         LOGGER_FILE,             # ai-controller.log
         BACKUP_DIR_NAME + "/",   # .ai-controller-backups/
     ]
+    if json_output:
+        from .tasks import TASK_JSON_FILE
+        generated_entries.append(TASK_JSON_FILE)      # AI-TASKS.json
+        generated_entries.append("AI-CHANGELOG.jsonl")
 
     gitignore_path = Path(target_dir) / ".gitignore"
     if not gitignore_path.is_file():
@@ -197,11 +205,12 @@ def ensure_gitignore(target_dir: str) -> bool:
     return True
 
 
-def init_log(target_dir: str, agent: str, model_hint: str = ""):
+def init_log(target_dir: str, agent: str, model_hint: str = "", json_output: bool = False):
     """初始化 changelog 文件和日志系统。
 
     如果 AI-CHANGELOG.md 已存在则追加模式(不覆盖),
     同时初始化 logging 使其同时输出到控制台和 ai-controller.log 文件。
+    若 json_output 为 True，同时创建/截断 AI-CHANGELOG.jsonl。
     """
     log_path = Path(target_dir) / LOG_FILE
     model_str = f" ({model_hint})" if model_hint else ""
@@ -219,6 +228,12 @@ def init_log(target_dir: str, agent: str, model_hint: str = ""):
     # 设置双输出 logger(控制台 + 文件)
     _setup_logging(target_dir)
     logger.info(f"AI 自迭代控制器启动 - Agent: {agent}{model_str}, 目标: {target_dir}")
+
+    # ── JSONL changelog 初始化 ──
+    if json_output:
+        jl_path = Path(target_dir) / "AI-CHANGELOG.jsonl"
+        if not jl_path.exists():
+            jl_path.write_text("", encoding="utf-8")
 
 
 def write_run_header(target_dir: str, run_count: int):
@@ -245,6 +260,7 @@ def write_round_log(
     summary: str,
     changed_files: list[str],
     elapsed: float,
+    json_output: bool = False,
 ):
     """追加一轮的改动记录到 changelog"""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -269,6 +285,22 @@ def write_round_log(
     with open(log_path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
+    # ── JSONL 追加 ──
+    if json_output:
+        jl_path = Path(target_dir) / "AI-CHANGELOG.jsonl"
+        jl_entry = {
+            "round": round_num,
+            "timestamp": ts,
+            "summary": summary,
+            "changed_files": changed_files,
+            "elapsed": round(elapsed, 1),
+        }
+        try:
+            with open(jl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(jl_entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning("无法写入 JSONL changelog: %s", e)
+
 
 
 
@@ -287,6 +319,7 @@ def _execute_single_round(
     error_label: str = "Agent 返回异常",
     defer_commit: bool = False,
     no_commit: bool = False,
+    json_output: bool = False,
 ) -> dict:
     """执行单轮迭代的核心逻辑：备份、调用 Agent、检测改动、记录日志、Git 提交。
 
@@ -328,7 +361,7 @@ def _execute_single_round(
     # ── Agent 异常且无改动:记录日志后返回 ──
     if not success and not has_diff:
         logger.warning(f"Agent 返回异常,{error_label}")
-        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed, json_output=json_output)
         return {"success": False, "summary": summary, "changed_files": [], "elapsed": elapsed, "has_diff": False}
 
     # ── Agent 异常但有改动:警告后继续处理 ──
@@ -336,7 +369,7 @@ def _execute_single_round(
         logger.warning("Agent 返回异常但仍有文件改动,继续处理...")
 
     if has_diff:
-        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed)
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", changed_files, elapsed, json_output=json_output)
 
         # ── Git 提交 ──        
         if git_repo and not defer_commit and not no_commit:
@@ -353,7 +386,7 @@ def _execute_single_round(
                f"{' ...' if len(changed_files) > 5 else ''}")
     else:
         logger.info(f"本轮无文件改动 - {summary}")
-        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed)
+        write_round_log(target_dir, round_num, f"{summary_prefix}{summary}", [], elapsed, json_output=json_output)
 
     return {"success": success, "summary": summary, "changed_files": changed_files, "elapsed": elapsed, "has_diff": has_diff}
 
@@ -374,6 +407,7 @@ def _execute_task_with_retry(
     round_num: int,
     sleep_between: float,
     no_commit: bool = False,
+    json_output: bool = False,
 ) -> dict:
     """执行单个任务，带测试验证和重试。
 
@@ -414,6 +448,7 @@ def _execute_task_with_retry(
             error_label=f"任务 #{task_id} 执行失败",
             defer_commit=True,  # 始终推迟提交，由外层统一处理
             no_commit=no_commit,
+            json_output=json_output,
         )
         total_elapsed += result["elapsed"]
 
@@ -492,6 +527,7 @@ def run_loop(
     no_commit: bool = False,
     test_command_override: Optional[str] = None,
     task_ids: Optional[set] = None,
+    json_output: bool = False,
 ):
     print()
     print("╔═══════════════════════════════════════════════╗")
@@ -524,12 +560,12 @@ def run_loop(
     print()
 
     model_hint = extract_model_hint(agent_args)
-    init_log(target_dir, agent, model_hint)
+    init_log(target_dir, agent, model_hint, json_output=json_output)
     if model_hint:
         print(f"  模型     : {model_hint}")
 
     # 自动管理 .gitignore：将生成的文件路径追加到目标仓库的忽略列表
-    ensure_gitignore(target_dir)
+    ensure_gitignore(target_dir, json_output=json_output)
 
     # 检查工作区是否有未提交的改动,如有则自动 stash 隔离
     stashed = False
@@ -607,7 +643,8 @@ def run_loop(
                        run_count=metadata["run_count"],
                        last_run=metadata["last_run"],
                        global_round=metadata["global_round"],
-                       test_command=test_command)
+                       test_command=test_command,
+                       json_output=json_output)
         logger.info(f"任务列表已生成: {len(tasks)} 个任务,保存至 {TASK_FILE}")
 
         # 打印全部任务概览
@@ -690,7 +727,8 @@ def run_loop(
                 )
                 mark_task_done(target_dir, task["id"], round_num, tasks,
                                run_count=run_count, last_run=last_run,
-                               global_round=round_num, gen_time=gen_time)
+                               global_round=round_num, gen_time=gen_time,
+                               json_output=json_output)
                 if git_repo and not no_commit:
                     git_commit(target_dir, round_num, f"Skip task #{tid}: {title}")
                 consecutive_noops = 0
@@ -711,6 +749,7 @@ def run_loop(
                 max_retries, no_backup, timeout, agent_args, keep_backups,
                 round_num, sleep_between,
                 no_commit=no_commit,
+                json_output=json_output,
             )
 
             if not result["success"] and not result["has_diff"]:
@@ -733,7 +772,8 @@ def run_loop(
 
             mark_task_done(target_dir, task["id"], round_num, tasks,
                            run_count=run_count, last_run=last_run,
-                           global_round=round_num, gen_time=gen_time)
+                           global_round=round_num, gen_time=gen_time,
+                           json_output=json_output)
             consecutive_noops = 0
 
             if git_repo and not no_commit:
@@ -750,7 +790,8 @@ def run_loop(
     save_task_list(target_dir, tasks,
                    run_count=run_count, last_run=last_run,
                    global_round=round_num, gen_time=gen_time,
-                   test_command=test_command)
+                   test_command=test_command,
+                   json_output=json_output)
 
     if stashed:
         git_stash_pop(target_dir)
@@ -888,6 +929,8 @@ def main():
                         help="手动指定测试命令,覆盖 AI 规划阶段输出的 test_command")
     parser.add_argument("--task-ids", default="",
                         help="只运行指定 ID 的任务子集，逗号分隔（如 1,3,5 或 1-3,5）")
+    parser.add_argument("--json-output", action="store_true",
+                        help="同时输出 AI-TASKS.json 和 AI-CHANGELOG.jsonl（机器可读格式）")
 
     try:
         _version = importlib.metadata.version("ai-controller")
@@ -980,7 +1023,8 @@ def main():
         else:
             save_task_list(str(target), tasks, run_count=1,
                            last_run="", global_round=0,
-                           test_command=test_command)
+                           test_command=test_command,
+                           json_output=args.json_output)
             logger.info(f"任务列表已保存至 {TASK_FILE}(共 {len(tasks)} 个任务)")
             if test_command:
                 logger.info(f"测试命令: {test_command}")
@@ -1002,6 +1046,7 @@ def main():
             no_commit=args.no_commit,
             test_command_override=args.test_command,
             task_ids=task_ids,
+            json_output=args.json_output,
         )
     except KeyboardInterrupt:
         print("\n\n⏹ 用户中断,退出。")
