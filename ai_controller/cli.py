@@ -97,11 +97,13 @@ def _parse_task_ids(raw: str) -> set[int]:
     return ids
 
 
-def _filter_tasks_by_ids(tasks: list, task_ids: set, target_dir: str) -> list:
-    """按 task_ids 过滤任务列表，保留匹配 ID 的待执行任务。
+def _filter_tasks_by_ids(tasks: list, task_ids: set) -> list:
+    """按 task_ids 过滤任务列表，保留匹配 ID 的任务。
 
-    已完成且匹配的任务保留其完成状态；不匹配 ID 的任务直接丢弃。
+    已完成且匹配的任务保留其完成状态；不匹配 ID 的任务不包含在返回结果中。
     对 task_ids 中存在但 tasks 中不存在的 ID，记录警告。
+
+    过滤仅作用于内存中的可执行子集，不会覆盖磁盘上的完整任务列表。
     """
     task_id_set = {t.get("id") for t in tasks}
     missing = task_ids - task_id_set
@@ -115,9 +117,6 @@ def _filter_tasks_by_ids(tasks: list, task_ids: set, target_dir: str) -> list:
         "按 --task-ids 过滤: 保留 %d/%d 个任务",
         len(filtered), len(tasks),
     )
-    # 回写到文件，使 AI-TASKS.md 反映过滤后的任务列表
-    from .tasks import save_task_list
-    save_task_list(target_dir, filtered)
     return filtered
 
 
@@ -611,9 +610,10 @@ def run_loop(
         logger.info(f"{'─' * 40}")
 
     # ─── 按 --task-ids 过滤任务 ───
+    active_tasks = tasks
     if task_ids is not None and tasks is not None:
-        tasks = _filter_tasks_by_ids(tasks, task_ids, target_dir)
-        if not tasks:
+        active_tasks = _filter_tasks_by_ids(tasks, task_ids)
+        if not active_tasks:
             logger.info("所有指定 ID 的任务已完成或不存在，退出。")
             if stashed:
                 git_stash_pop(target_dir)
@@ -640,7 +640,7 @@ def run_loop(
 
     # ─── 预览模式:打印任务执行计划后退出 ───
     if dry_run:
-        _dry_run_task_loop(target_dir, agent, tasks, max_rounds, agent_args, test_command)
+        _dry_run_task_loop(target_dir, agent, active_tasks, max_rounds, agent_args, test_command)
         if stashed:
             git_stash_pop(target_dir)
         return
@@ -653,7 +653,7 @@ def run_loop(
 
     while True:
         # 获取下一个待执行任务(从内存缓存查找,避免重复解析文件)
-        task = get_next_pending_task(target_dir, tasks)
+        task = get_next_pending_task(target_dir, active_tasks)
 
         # 任务切换时重置连续无改动计数器(每个任务独立计数)
         if task is not None and task.get("id") != current_task_id:
@@ -666,7 +666,7 @@ def run_loop(
         round_num += 1
 
         if max_rounds > 0 and round_num > max_rounds:
-            pending_left = sum(1 for t in tasks if t.get("status") != "done")
+            pending_left = sum(1 for t in active_tasks if t.get("status") != "done")
             logger.info(
                 f"达到最大轮次 {max_rounds}(剩余 {pending_left} 个待执行任务),退出。"
             )
