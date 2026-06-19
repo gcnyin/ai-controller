@@ -192,7 +192,10 @@ def save_task_list(target_dir: str, tasks: List[dict],
             lines.append("")
 
     path = Path(target_dir) / TASK_FILE
-    path.write_text("\n".join(lines), encoding="utf-8")
+    try:
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError as e:
+        logger.warning("无法写入任务文件 %s: %s", path, e)
 
 
 def load_task_metadata(target_dir: str) -> Dict[str, Any]:
