@@ -5,7 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from . import SKIP_DIRS, LOG_FILE
+from . import SKIP_DIRS, LOG_FILE, LOGGER_FILE
+from .tasks import TASK_FILE
 from .backup import BACKUP_DIR_NAME
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
     target_path = Path(target_dir)
 
     # 控制器自身的管理文件，不应计入项目改动
-    controller_files = {LOG_FILE}
+    controller_files = {LOG_FILE, LOGGER_FILE, TASK_FILE}
 
     # ── 优先：git 仓库 ──
     if (target_path / ".git").is_dir():
@@ -166,7 +167,7 @@ def get_changed_files(target_dir: str, since_ts: float = 0) -> list[str]:
             dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".ai-controller-")]
             for f in files:
                 # 过滤控制器自身的管理文件
-                if f == LOG_FILE:
+                if f in controller_files:
                     continue
                 fp = os.path.join(root, f)
                 try:
